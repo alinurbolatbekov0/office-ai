@@ -1,7 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { getRuntimeConfig } from "../platform/desktopBridge";
-import { getAgents, getHealth, type AgentDescriptor, type HealthStatus } from "../platform/localApi";
+import {
+  getAgents,
+  getHealth,
+  getOperations,
+  getSettings,
+  saveSetting,
+  type AgentDescriptor,
+  type AppSettings,
+  type HealthStatus,
+  type OperationEvent,
+} from "../platform/localApi";
+import SettingsPage from "../settings/SettingsPage";
 
 type RouteId = "home" | "library" | "settings" | string;
 
@@ -17,17 +28,25 @@ function App() {
   const [agents, setAgents] = useState<AgentDescriptor[]>([]);
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [runtimeConfig, setRuntimeConfig] = useState<Awaited<ReturnType<typeof getRuntimeConfig>> | null>(null);
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [operations, setOperations] = useState<OperationEvent[]>([]);
+  const [savingKey, setSavingKey] = useState<keyof AppSettings | null>(null);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
     getRuntimeConfig()
       .then((config) => {
-        return Promise.all([getHealth(config), getAgents(config)]);
+        setRuntimeConfig(config);
+        return Promise.all([getHealth(config), getAgents(config), getSettings(config), getOperations(config)]);
       })
-      .then(([nextHealth, nextAgents]) => {
+      .then(([nextHealth, nextAgents, nextSettings, nextOperations]) => {
         if (!active) return;
         setHealth(nextHealth);
         setAgents(nextAgents);
+        setSettings(nextSettings);
+        setOperations(nextOperations);
       })
       .catch((error: unknown) => {
         if (active) {
@@ -39,6 +58,26 @@ function App() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = settings?.theme ?? "light";
+  }, [settings?.theme]);
+
+  async function handleSaveSetting(key: keyof AppSettings, value: AppSettings[keyof AppSettings]) {
+    if (!runtimeConfig) return;
+    setSavingKey(key);
+    setSaveMessage(null);
+    try {
+      const nextSettings = await saveSetting(runtimeConfig, key, value);
+      setSettings(nextSettings);
+      setOperations(await getOperations(runtimeConfig));
+      setSaveMessage("Настройка сохранена.");
+    } catch (error) {
+      setSaveMessage(error instanceof Error ? error.message : "Не удалось сохранить настройку.");
+    } finally {
+      setSavingKey(null);
+    }
+  }
 
   const activeAgent = useMemo(() => agents.find((agent) => agent.id === route), [agents, route]);
   const allNavigation = [...baseNavigation, ...agents.map((agent) => ({ id: agent.id, label: agent.title, icon: "✦" }))];
@@ -101,7 +140,17 @@ function App() {
         <div className="page-content">
           {route === "home" && <HomePage agents={agents} health={health} onNavigate={setRoute} />}
           {route === "library" && <PlaceholderPage title="Библиотека документов" icon="▤" />}
-          {route === "settings" && <PlaceholderPage title="Настройки" icon="⚙" />}
+          {route === "settings" && (
+            settings ? (
+              <SettingsPage
+                operations={operations}
+                saveMessage={saveMessage}
+                savingKey={savingKey}
+                settings={settings}
+                onSave={handleSaveSetting}
+              />
+            ) : <PlaceholderPage title="Настройки" icon="⚙" />
+          )}
           {activeAgent && <AgentPage agent={activeAgent} />}
         </div>
       </main>
