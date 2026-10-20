@@ -3,26 +3,35 @@
 from __future__ import annotations
 
 import secrets
+from datetime import date
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
+from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from office_ai import __version__
 from office_ai.application.agent_catalog import list_agents
+from office_ai.application.document_library import DocumentLibrary
 from office_ai.application.operation_journal import read_recent_operations
 from office_ai.application.settings import read_settings, update_setting
 from office_ai.domain.settings import InvalidSetting
 from office_ai.infrastructure.database import LocalDatabase
 from office_ai.infrastructure.storage_paths import get_user_data_directory
+from office_ai.domain.documents import InvalidDocument, MAX_DOCUMENT_SIZE_BYTES
 
 API_PREFIX: Final = "/api/v1"
 TOKEN_HEADER: Final = "x-officeai-token"
-_ALLOWED_METHODS: Final = {"GET", "PUT"}
-_ALLOWED_HEADERS: Final = {TOKEN_HEADER, "content-type"}
+_ALLOWED_METHODS: Final = {"GET", "PUT", "POST"}
+_ALLOWED_HEADERS: Final = {
+    TOKEN_HEADER,
+    "content-type",
+    "x-officeai-filename",
+    "x-officeai-confirm-duplicate",
+}
 
 
 class SettingUpdateRequest(BaseModel):
@@ -49,6 +58,7 @@ def create_app(
     database.initialize()
     database.record_operation("app_started", message_code="app_started")
     app.state.database = database
+    app.state.document_library = DocumentLibrary(database)
 
     @app.middleware("http")
     async def guard_local_requests(request: Request, call_next):
@@ -84,6 +94,9 @@ def create_app(
                 },
             )
 
+        if request.method not in _ALLOWED_METHODS:
+            return JSONResponse({"detail": "Метод не поддерживается."}, status_code=405)
+
         supplied_token = request.headers.get(TOKEN_HEADER, "")
         if not secrets.compare_digest(supplied_token, session_token):
             return JSONResponse({"detail": "Сессия приложения не подтверждена."}, status_code=403)
@@ -117,6 +130,88 @@ def create_app(
     @app.get(f"{API_PREFIX}/operations")
     async def operations(limit: int = Query(default=50, ge=1, le=100)) -> dict[str, list[dict[str, object]]]:
         return {"operations": read_recent_operations(app.state.database, limit)}
+
+    @app.get(f"{API_PREFIX}/documents")
+    async def documents(
+        search: str = Query(default="", max_length=200),
+        document_type: Literal["DOCX", "XLSX", "PPTX", "PDF", "JPEG", "PNG"] | None = Query(default=None, alias="type"),
+        imported_from: date | None = None,
+        imported_to: date | None = None,
+        sort_by: Literal["name", "imported_at", "size_bytes", "type"] = "imported_at",
+        sort_order: Literal["asc", "desc"] = "desc",
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        if imported_from and imported_to and imported_from > imported_to:
+            raise HTTPException(status_code=422, detail="Начальная дата позже конечной.")
+        entries, total = app.state.document_library.query(
+            search=search,
+            detected_type=document_type,
+            imported_from=imported_from.isoformat() if imported_from else None,
+            imported_to=imported_to.isoformat() if imported_to else None,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            limit=limit,
+            offset=offset,
+        )
+        return {"documents": entries, "total": total}
+
+    @app.post(f"{API_PREFIX}/documents", status_code=201, response_model=None)
+    async def upload_document(request: Request) -> Any:
+        encoded_name = request.headers.get("x-officeai-filename", "")
+        if not encoded_name:
+            raise HTTPException(status_code=400, detail="Не задано имя файла.")
+        try:
+            original_name = unquote(encoded_name, encoding="utf-8", errors="strict")
+        except UnicodeDecodeError as error:
+            raise HTTPException(status_code=400, detail="Имя файла имеет неверную кодировку.") from error
+        if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/octet-stream":
+            raise HTTPException(status_code=415, detail="Ожидалось тело файла application/octet-stream.")
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > MAX_DOCUMENT_SIZE_BYTES:
+                    raise HTTPException(status_code=413, detail="Размер файла превышает ограничение 100 МиБ.")
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail="Некорректный размер запроса.") from error
+
+        async def chunks():
+            async for chunk in request.stream():
+                yield chunk
+
+        try:
+            result = await app.state.document_library.upload(
+                original_name,
+                chunks(),
+                allow_duplicate=request.headers.get("x-officeai-confirm-duplicate") == "true",
+            )
+        except InvalidDocument as error:
+            return JSONResponse({"detail": str(error)}, status_code=422)
+        if result["duplicate"] and not result.get("confirmed"):
+            return JSONResponse(result, status_code=409)
+        return result
+
+    @app.get(f"{API_PREFIX}/documents/{{document_id}}/download")
+    async def download_document(document_id: str) -> FileResponse:
+        result = app.state.document_library.get_download(document_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        path, filename = result
+        media_types = {
+            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "pdf": "application/pdf",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "png": "image/png",
+        }
+        return FileResponse(
+            path,
+            media_type=media_types[filename.rsplit(".", 1)[-1].lower()],
+            filename=filename,
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
 
     if frontend_dist is not None and (frontend_dist / "index.html").is_file():
         app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")

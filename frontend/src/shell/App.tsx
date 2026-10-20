@@ -13,6 +13,7 @@ import {
   type OperationEvent,
 } from "../platform/localApi";
 import SettingsPage from "../settings/SettingsPage";
+import DocumentsPage from "../library/DocumentsPage";
 
 type RouteId = "home" | "library" | "settings" | string;
 
@@ -139,7 +140,7 @@ function App() {
 
         <div className="page-content">
           {route === "home" && <HomePage agents={agents} health={health} onNavigate={setRoute} />}
-          {route === "library" && <PlaceholderPage title="Библиотека документов" icon="▤" />}
+          {route === "library" && <DocumentsPage runtimeConfig={runtimeConfig} />}
           {route === "settings" && (
             settings ? (
               <SettingsPage

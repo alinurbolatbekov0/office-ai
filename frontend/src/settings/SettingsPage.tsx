@@ -97,12 +97,18 @@ export default function SettingsPage({
 function operationTitle(event: OperationEvent): string {
   if (event.operationCode === "app_started") return "Приложение запущено";
   if (event.operationCode === "setting_updated") return "Настройка сохранена";
+  if (event.operationCode === "document_uploaded") return "Документ добавлен";
+  if (event.operationCode === "document_duplicate_detected") return "Обнаружен дубликат";
+  if (event.operationCode === "document_upload_rejected") return "Загрузка отклонена";
   return "Операция";
 }
 
 function operationDescription(event: OperationEvent): string {
   if (event.entityId === "theme") return "Изменена цветовая тема";
   if (event.entityId === "confirm_destructive_actions") return "Обновлено подтверждение опасных действий";
+  if (event.operationCode === "document_uploaded") return "Файл добавлен в локальную библиотеку";
+  if (event.operationCode === "document_duplicate_detected") return "Байты совпадают с файлом в библиотеке";
+  if (event.operationCode === "document_upload_rejected") return "Тип, содержимое или размер не прошли проверку";
   return event.outcome === "success" ? "Выполнено успешно" : "Не выполнено";
 }
 
