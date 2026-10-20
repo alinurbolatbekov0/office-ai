@@ -8,14 +8,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 from contextlib import contextmanager
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from office_ai.domain.settings import DEFAULT_SETTINGS, SettingValue, validate_setting
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_OPERATION_LIMIT = 100
-_ALLOWED_OPERATION_CODES = {"app_started", "setting_updated"}
-_ALLOWED_MESSAGE_CODES = {"app_started", "setting_saved"}
+_ALLOWED_OPERATION_CODES = {
+    "app_started",
+    "setting_updated",
+    "document_uploaded",
+    "document_duplicate_detected",
+    "document_upload_rejected",
+}
+_ALLOWED_MESSAGE_CODES = {
+    "app_started",
+    "setting_saved",
+    "document_uploaded",
+    "document_duplicate_detected",
+    "document_upload_rejected",
+}
 
 
 def _utc_now() -> str:
@@ -101,6 +113,49 @@ class LocalDatabase:
                         (key, json.dumps(value), _utc_now()),
                     )
 
+            if version < 2:
+                if version >= 1:
+                    connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """
+                    CREATE TABLE stored_files (
+                        id TEXT PRIMARY KEY,
+                        sha256 TEXT NOT NULL UNIQUE,
+                        storage_key TEXT NOT NULL UNIQUE,
+                        size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+                        detected_type TEXT NOT NULL CHECK (detected_type IN
+                            ('DOCX', 'XLSX', 'PPTX', 'PDF', 'JPEG', 'PNG')),
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    "CREATE INDEX stored_files_sha256_idx ON stored_files(sha256)"
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE documents (
+                        id TEXT PRIMARY KEY,
+                        stored_file_id TEXT NOT NULL REFERENCES stored_files(id),
+                        original_name TEXT NOT NULL,
+                        extension TEXT NOT NULL CHECK (extension IN
+                            ('docx', 'xlsx', 'pptx', 'pdf', 'jpg', 'jpeg', 'png')),
+                        imported_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    "CREATE INDEX documents_imported_at_idx ON documents(imported_at DESC)"
+                )
+                connection.execute(
+                    "CREATE INDEX documents_stored_file_idx ON documents(stored_file_id)"
+                )
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (2, _utc_now()),
+                )
+                connection.execute("PRAGMA user_version = 2")
+
     def get_settings(self) -> dict[str, SettingValue]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -141,6 +196,181 @@ class LocalDatabase:
             )
         return self.get_settings()
 
+    def register_document(
+        self,
+        *,
+        document_id: str,
+        stored_file_id: str,
+        storage_key: str,
+        sha256: str,
+        size_bytes: int,
+        detected_type: str,
+        original_name: str,
+        extension: str,
+        allow_duplicate: bool,
+    ) -> dict[str, Any]:
+        """Register verified bytes and metadata, deduplicating by SHA-256."""
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT id FROM stored_files WHERE sha256 = ?", (sha256,)
+            ).fetchone()
+            duplicate = existing is not None
+            if duplicate and not allow_duplicate:
+                self._insert_operation(
+                    connection,
+                    "document_duplicate_detected",
+                    "success",
+                    None,
+                    None,
+                    "document_duplicate_detected",
+                )
+                return {
+                    "duplicate": True,
+                    "storedFileId": existing["id"],
+                    "document": None,
+                }
+            if duplicate:
+                effective_stored_file_id = existing["id"]
+            else:
+                effective_stored_file_id = stored_file_id
+                connection.execute(
+                    """
+                    INSERT INTO stored_files
+                        (id, sha256, storage_key, size_bytes, detected_type, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (stored_file_id, sha256, storage_key, size_bytes, detected_type, _utc_now()),
+                )
+
+            imported_at = _utc_now()
+            connection.execute(
+                """
+                INSERT INTO documents(id, stored_file_id, original_name, extension, imported_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (document_id, effective_stored_file_id, original_name, extension, imported_at),
+            )
+            self._insert_operation(
+                connection,
+                "document_uploaded",
+                "success",
+                "document",
+                document_id,
+                "document_uploaded",
+            )
+            row = connection.execute(
+                """
+                SELECT d.id, d.original_name, d.extension, d.imported_at,
+                       f.size_bytes, f.detected_type, f.sha256
+                FROM documents d JOIN stored_files f ON f.id = d.stored_file_id
+                WHERE d.id = ?
+                """,
+                (document_id,),
+            ).fetchone()
+        return {"duplicate": duplicate, "storedFileId": effective_stored_file_id, "document": self._document_row(row)}
+
+    def list_duplicate_documents(self, sha256: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT d.id, d.original_name, d.extension, d.imported_at,
+                       f.size_bytes, f.detected_type, f.sha256
+                FROM documents d JOIN stored_files f ON f.id = d.stored_file_id
+                WHERE f.sha256 = ?
+                ORDER BY d.imported_at DESC, d.id
+                """,
+                (sha256,),
+            ).fetchall()
+        return [self._document_row(row) for row in rows]
+
+    def list_documents(
+        self,
+        *,
+        search: str = "",
+        detected_type: str | None = None,
+        imported_from: str | None = None,
+        imported_to: str | None = None,
+        sort_by: str = "imported_at",
+        sort_order: str = "desc",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        sort_columns = {
+            "name": "office_casefold(d.original_name)",
+            "imported_at": "d.imported_at",
+            "size_bytes": "f.size_bytes",
+            "type": "f.detected_type",
+        }
+        if sort_by not in sort_columns or sort_order not in {"asc", "desc"}:
+            raise ValueError("Unsupported document sort")
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if search:
+            escaped_search = search.casefold().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            clauses.append("office_casefold(d.original_name) LIKE office_casefold(?) ESCAPE '\\'")
+            parameters.append(f"%{escaped_search}%")
+        if detected_type:
+            clauses.append("f.detected_type = ?")
+            parameters.append(detected_type)
+        if imported_from:
+            clauses.append("date(d.imported_at) >= date(?)")
+            parameters.append(imported_from)
+        if imported_to:
+            clauses.append("date(d.imported_at) <= date(?)")
+            parameters.append(imported_to)
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        direction = sort_order.upper()
+        with self._connect() as connection:
+            connection.create_function("office_casefold", 1, lambda value: str(value).casefold())
+            total = connection.execute(
+                f"SELECT COUNT(*) FROM documents d JOIN stored_files f ON f.id = d.stored_file_id {where_sql}",
+                parameters,
+            ).fetchone()[0]
+            rows = connection.execute(
+                f"""
+                SELECT d.id, d.original_name, d.extension, d.imported_at,
+                       f.size_bytes, f.detected_type, f.sha256
+                FROM documents d JOIN stored_files f ON f.id = d.stored_file_id
+                {where_sql}
+                ORDER BY {sort_columns[sort_by]} {direction}, d.id
+                LIMIT ? OFFSET ?
+                """,
+                [*parameters, max(1, min(int(limit), 200)), max(0, int(offset))],
+            ).fetchall()
+        return [self._document_row(row) for row in rows], int(total)
+
+    def get_document_download(self, document_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT d.id, d.original_name, d.extension, d.imported_at,
+                       f.id AS storage_file_id, f.size_bytes, f.detected_type,
+                       f.sha256, f.storage_key
+                FROM documents d JOIN stored_files f ON f.id = d.stored_file_id
+                WHERE d.id = ?
+                """,
+                (document_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            **self._document_row(row),
+            "storageKey": row["storage_key"],
+            "storageFileId": row["storage_file_id"],
+        }
+
+    @staticmethod
+    def _document_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "name": row["original_name"],
+            "extension": row["extension"],
+            "importedAt": row["imported_at"],
+            "sizeBytes": row["size_bytes"],
+            "type": row["detected_type"],
+            "sha256": row["sha256"],
+        }
+
     def record_operation(
         self,
         operation_code: str,
@@ -174,10 +404,17 @@ class LocalDatabase:
             raise ValueError("Unsupported operation outcome")
         if operation_code not in _ALLOWED_OPERATION_CODES or message_code not in _ALLOWED_MESSAGE_CODES:
             raise ValueError("Unsupported operation or message code")
-        if entity_type not in {None, "setting"}:
+        if entity_type not in {None, "setting", "document"}:
             raise ValueError("Unsupported operation entity type")
-        if entity_id is not None and entity_id not in DEFAULT_SETTINGS:
+        if entity_type == "setting" and entity_id not in DEFAULT_SETTINGS:
             raise ValueError("Unsupported operation entity ID")
+        if entity_type == "document":
+            try:
+                UUID(entity_id or "")
+            except ValueError as error:
+                raise ValueError("Unsupported document ID") from error
+        if entity_type is None and entity_id is not None:
+            raise ValueError("An entity ID requires an entity type")
         connection.execute(
             """
             INSERT INTO operation_log

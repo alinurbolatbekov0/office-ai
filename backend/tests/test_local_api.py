@@ -6,9 +6,14 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import quote, urlencode, urlsplit
 from unittest.mock import patch
+from zipfile import ZIP_DEFLATED, ZipFile
+import io
 
 from office_ai.api.app import create_app
+from office_ai.domain.documents import InvalidDocument
+from office_ai.infrastructure.database import LocalDatabase
 from office_ai.infrastructure.storage_paths import get_user_data_directory
 
 
@@ -39,32 +44,42 @@ class LocalApiSecurityTests(unittest.TestCase):
     ) -> tuple[int, bytes, dict[str, str]]:
         request_headers = headers or self.headers
         raw_headers = [(key.lower().encode(), value.encode()) for key, value in request_headers.items()]
+        parsed_path = urlsplit(path)
+        path_only = parsed_path.path
         scope = {
             "type": "http",
             "asgi": {"version": "3.0"},
             "http_version": "1.1",
             "method": method,
             "scheme": "http",
-            "path": path,
-            "raw_path": path.encode(),
-            "query_string": b"",
+            "path": path_only,
+            "raw_path": path_only.encode(),
+            "query_string": parsed_path.query.encode(),
             "root_path": "",
             "headers": raw_headers,
             "client": ("127.0.0.1", 45678),
             "server": ("127.0.0.1", 43127),
         }
         messages: list[dict] = []
-        received = False
+        received_count = 0
+        response_complete = asyncio.Event()
 
         async def receive() -> dict:
-            nonlocal received
-            if received:
-                return {"type": "http.disconnect"}
-            received = True
-            return {"type": "http.request", "body": body, "more_body": False}
+            nonlocal received_count
+            if received_count == 0:
+                received_count += 1
+                return {"type": "http.request", "body": body, "more_body": bool(body)}
+            if received_count == 1 and body:
+                received_count += 1
+                return {"type": "http.request", "body": b"", "more_body": False}
+            if not response_complete.is_set():
+                await response_complete.wait()
+            return {"type": "http.disconnect"}
 
         async def send(message: dict) -> None:
             messages.append(message)
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                response_complete.set()
 
         async def invoke() -> None:
             await self.app(scope, receive, send)
@@ -126,10 +141,43 @@ class LocalApiSecurityTests(unittest.TestCase):
         self.assertTrue(database_path.is_file())
         self.assertEqual(database_path.parent, self.data_directory)
         with sqlite3.connect(database_path) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
             self.assertEqual(
-                connection.execute("SELECT version FROM schema_migrations").fetchone()[0],
-                1,
+                connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
+                2,
+            )
+            self.assertIn(
+                "documents",
+                {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")},
+            )
+
+    def test_version_one_database_migrates_without_losing_settings(self) -> None:
+        legacy_path = self.data_directory / "legacy"
+        legacy_path.mkdir()
+        database_path = legacy_path / "officeai.sqlite3"
+        with sqlite3.connect(database_path) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+                INSERT INTO schema_migrations VALUES (1, '2026-01-01T00:00:00Z');
+                CREATE TABLE app_settings(setting_key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL);
+                INSERT INTO app_settings VALUES ('theme', '"dark"', '2026-01-01T00:00:00Z');
+                INSERT INTO app_settings VALUES ('confirm_destructive_actions', 'true', '2026-01-01T00:00:00Z');
+                CREATE TABLE operation_log(
+                    id TEXT PRIMARY KEY, occurred_at TEXT NOT NULL, operation_code TEXT NOT NULL,
+                    outcome TEXT NOT NULL, entity_type TEXT, entity_id TEXT, message_code TEXT NOT NULL
+                );
+                PRAGMA user_version = 1;
+                """
+            )
+        database = LocalDatabase(legacy_path)
+        database.initialize()
+        self.assertEqual(database.get_settings()["theme"], "dark")
+        with sqlite3.connect(database_path) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(
+                [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")],
+                [1, 2],
             )
 
     def test_windows_data_directory_uses_local_app_data(self) -> None:
@@ -188,6 +236,101 @@ class LocalApiSecurityTests(unittest.TestCase):
         )
         self.assertEqual(invalid_value[0], 422)
         self.assertEqual(unknown_key[0], 422)
+
+    def upload(self, name: str, contents: bytes, *, confirm_duplicate: bool = False) -> tuple[int, bytes, dict[str, str]]:
+        headers = {
+            **self.headers,
+            "content-type": "application/octet-stream",
+            "x-officeai-filename": quote(name, safe=""),
+        }
+        if confirm_duplicate:
+            headers["x-officeai-confirm-duplicate"] = "true"
+        return self.request("/api/v1/documents", headers, method="POST", body=contents)
+
+    def test_upload_detects_duplicates_and_requires_explicit_confirmation(self) -> None:
+        original = b"%PDF-1.7\nsynthetic anonymized test fixture\n%%EOF"
+        status, body, _ = self.upload("Тестовый отчёт.pdf", original)
+        self.assertEqual(status, 201)
+        document = json.loads(body)["document"]
+        self.assertEqual(document["type"], "PDF")
+        self.assertEqual(document["sizeBytes"], len(original))
+
+        duplicate_status, duplicate_body, _ = self.upload("Копия.pdf", original)
+        self.assertEqual(duplicate_status, 409)
+        self.assertEqual(len(json.loads(duplicate_body)["existingDocuments"]), 1)
+
+        path, download_name = self.app.state.document_library.get_download(document["id"])
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(download_name, "Тестовый отчёт.pdf")
+        self.assertEqual(
+            self.request("/api/v1/documents/not-a-uuid/download", self.headers)[0],
+            404,
+        )
+
+        confirmed_status, confirmed_body, _ = self.upload("Копия.pdf", original, confirm_duplicate=True)
+        self.assertEqual(confirmed_status, 201)
+        self.assertTrue(json.loads(confirmed_body)["confirmed"])
+        with sqlite3.connect(self.data_directory / "officeai.sqlite3") as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM stored_files").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 2)
+        _, journal_body, _ = self.request("/api/v1/operations", self.headers)
+        journal = journal_body.decode()
+        self.assertNotIn("synthetic anonymized test fixture", journal)
+        self.assertNotIn("Тестовый отчёт.pdf", journal)
+
+    def test_upload_limit_stops_streaming_and_cleans_temporary_file(self) -> None:
+        library = self.app.state.document_library
+
+        async def oversized_chunks():
+            yield b"%PDF-"
+            yield b"1234"
+
+        with patch("office_ai.application.document_library.MAX_DOCUMENT_SIZE_BYTES", 8):
+            with self.assertRaises(InvalidDocument):
+                asyncio.run(library.upload("large.pdf", oversized_chunks()))
+        self.assertEqual(list((self.data_directory / "documents" / ".tmp").iterdir()), [])
+
+    def test_png_and_jpeg_signatures_require_complete_image_end_markers(self) -> None:
+        png_chunks = (
+            b"\x89PNG\r\n\x1a\n"
+            + b"\x00\x00\x00\rIHDR"
+            + (1).to_bytes(4, "big")
+            + (1).to_bytes(4, "big")
+            + b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
+            + b"\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        self.assertEqual(self.upload("пиксель.png", png_chunks)[0], 201)
+        self.assertEqual(self.upload("not-image.jpg", b"\xff\xd8\xffbroken")[0], 422)
+
+    def test_file_signatures_extensions_and_original_names_are_validated(self) -> None:
+        mismatch_status = self.upload("fake.png", b"%PDF-1.7\\nnot a PNG")[0]
+        unsupported_status = self.upload("notes.txt", b"some text")[0]
+        traversal_status, traversal_body, _ = self.upload("../../Часть.pdf", b"%PDF-1.7\\nsynthetic")
+        self.assertEqual(mismatch_status, 422)
+        self.assertEqual(unsupported_status, 422)
+        self.assertEqual(traversal_status, 201)
+        self.assertEqual(json.loads(traversal_body)["document"]["name"], "Часть.pdf")
+
+    def test_library_search_is_unicode_case_insensitive_and_sort_is_allowlisted(self) -> None:
+        self.assertEqual(self.upload("Отчёт ҚАЗАҚ.pdf", b"%PDF-1.7\\nfixture")[0], 201)
+        search = urlencode({"search": "қазақ", "sort_by": "name", "sort_order": "asc"})
+        status, body, _ = self.request(f"/api/v1/documents?{search}", self.headers)
+        self.assertEqual(status, 200)
+        result = json.loads(body)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["documents"][0]["name"], "Отчёт ҚАЗАҚ.pdf")
+
+        invalid_sort = self.request("/api/v1/documents?sort_by=original_name%3Bdrop+table", self.headers)
+        self.assertEqual(invalid_sort[0], 422)
+
+    def test_office_container_is_checked_without_extracting(self) -> None:
+        buffer = io.BytesIO()
+        with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
+            archive.writestr("[Content_Types].xml", "<Types/>")
+            archive.writestr("word/document.xml", "<document/>")
+        status, body, _ = self.upload("Контракт.docx", buffer.getvalue())
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(body)["document"]["type"], "DOCX")
 
 
 if __name__ == "__main__":
