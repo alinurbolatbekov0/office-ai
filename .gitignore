@@ -1,0 +1,29 @@
+# Local user data and databases
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+backups/
+documents/
+user-data/
+data/
+logs/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.pfx
+*.key
+
+# Build output and local tool state
+dist/
+build/
+release/
+__pycache__/
+*.py[cod]
+node_modules/
+.venv/
+venv/
