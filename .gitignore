@@ -4,6 +4,17 @@
 *.sqlite3-*
 *.db
 *.db-*
+*.docx
+*.xlsx
+*.pptx
+*.pdf
+*.jpg
+*.jpeg
+*.png
+*.bak
+*.backup
+*.zip
+*.7z
 backups/
 documents/
 user-data/
