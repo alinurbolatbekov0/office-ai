@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "office-ai-local"
+version = "0.1.0"
+description = "Local Office AI desktop scaffold"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi==0.115.12",
+  "uvicorn==0.34.0",
+  "pywebview==5.4",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["office_ai*"]
