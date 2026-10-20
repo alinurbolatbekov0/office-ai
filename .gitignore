@@ -27,14 +27,18 @@ logs/
 !.env.example
 *.pem
 *.pfx
+*.p12
 *.key
+*.log
 
 # Build output and local tool state
 dist/
 build/
 release/
+*.egg-info/
 __pycache__/
 *.py[cod]
+.pytest_cache/
 node_modules/
 .venv/
 venv/
