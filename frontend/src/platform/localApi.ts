@@ -7,6 +7,31 @@ export interface AgentDescriptor {
   status: "prepared";
 }
 
+export interface AgentTask {
+  agent_id: string;
+  code: string;
+  title: string;
+  purpose: string;
+  allowed_categories: string[];
+}
+
+export interface AgentPreviewSource {
+  id: string;
+  name: string;
+  category: string;
+  text: string;
+}
+
+export interface AgentTaskPreview {
+  agentId: string;
+  taskCode: string;
+  taskTitle: string;
+  purpose: string;
+  sources: AgentPreviewSource[];
+  payloadPreview: string;
+  payloadCharacters: number;
+}
+
 export interface HealthStatus {
   status: "ok";
   application: string;
@@ -203,6 +228,34 @@ export function getHealth(config: RuntimeConfig): Promise<HealthStatus> {
 export async function getAgents(config: RuntimeConfig): Promise<AgentDescriptor[]> {
   const response = await request<{ agents: AgentDescriptor[] }>(config, "agents");
   return response.agents;
+}
+
+export async function getAgentTasks(config: RuntimeConfig, agentId: string): Promise<AgentTask[]> {
+  const response = await request<{ tasks: AgentTask[] }>(config, `agents/${encodeURIComponent(agentId)}/tasks`);
+  return response.tasks;
+}
+
+export async function createAgentTaskPreview(
+  config: RuntimeConfig,
+  agentId: string,
+  taskCode: string,
+  documentIds: string[],
+  instruction: string,
+): Promise<AgentTaskPreview> {
+  const response = await fetch(
+    `${config.apiBaseUrl}/agents/${encodeURIComponent(agentId)}/tasks/${encodeURIComponent(taskCode)}/preview`,
+    {
+      method: "POST",
+      headers: { "X-OfficeAI-Token": config.sessionToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ document_ids: documentIds, instruction }),
+      cache: "no-store",
+    },
+  );
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? `Не удалось подготовить предпросмотр (код ${response.status}).`);
+  }
+  return response.json() as Promise<AgentTaskPreview>;
 }
 
 export async function getSettings(config: RuntimeConfig): Promise<AppSettings> {
