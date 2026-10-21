@@ -14,6 +14,7 @@ import {
 } from "../platform/localApi";
 import SettingsPage from "../settings/SettingsPage";
 import DocumentsPage from "../library/DocumentsPage";
+import AgentWorkspace from "../agents/AgentWorkspace";
 
 type RouteId = "home" | "library" | "settings" | string;
 
@@ -101,6 +102,8 @@ function App() {
               aria-current={route === item.id ? "page" : undefined}
               className={`nav-item ${route === item.id ? "active" : ""}`}
               key={item.id}
+              title={item.label}
+              aria-label={item.label}
               onClick={() => setRoute(item.id)}
               type="button"
             >
@@ -115,6 +118,8 @@ function App() {
           aria-current={route === "settings" ? "page" : undefined}
           className={`nav-item ${route === "settings" ? "active" : ""}`}
           onClick={() => setRoute("settings")}
+          title={footerNavigation[0].label}
+          aria-label={footerNavigation[0].label}
           type="button"
         >
           <span className="nav-icon" aria-hidden="true">{footerNavigation[0].icon}</span>
@@ -154,7 +159,7 @@ function App() {
               />
             ) : <PlaceholderPage title="Настройки" icon="⚙" />
           )}
-          {activeAgent && <AgentPage agent={activeAgent} />}
+          {activeAgent && <AgentWorkspace agent={activeAgent} />}
         </div>
       </main>
     </div>
@@ -223,18 +228,6 @@ function HomePage({
         <div className="status-detail"><span>Состояние приложения</span><strong>{health ? "Готово к настройке" : "Каркас запускается"}</strong></div>
       </section>
     </>
-  );
-}
-
-function AgentPage({ agent }: { agent: AgentDescriptor }) {
-  return (
-    <section className="placeholder-panel agent-placeholder">
-      <span className="placeholder-symbol">✦</span>
-      <span className="eyebrow">ПОДГОТОВЛЕННЫЙ МОДУЛЬ</span>
-      <h1>{agent.title}</h1>
-      <p>{agent.description}</p>
-      <div className="availability-note"><span /> Интерфейс агента подготовлен. Выполнение задач пока не подключено.</div>
-    </section>
   );
 }
 
