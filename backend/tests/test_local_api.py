@@ -177,10 +177,10 @@ class LocalApiSecurityTests(unittest.TestCase):
         self.assertTrue(database_path.is_file())
         self.assertEqual(database_path.parent, self.data_directory)
         with closing(sqlite3.connect(database_path)) as connection, connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
             self.assertEqual(
                 connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
-                2,
+                3,
             )
             self.assertIn(
                 "documents",
@@ -210,10 +210,10 @@ class LocalApiSecurityTests(unittest.TestCase):
         database.initialize()
         self.assertEqual(database.get_settings()["theme"], "dark")
         with closing(sqlite3.connect(database_path)) as connection, connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
             self.assertEqual(
                 [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")],
-                [1, 2],
+                [1, 2, 3],
             )
 
     def test_windows_data_directory_uses_local_app_data(self) -> None:
@@ -488,6 +488,16 @@ class LocalApiSecurityTests(unittest.TestCase):
         preview = json.loads(response.body)
         self.assertIn(source_text, preview["payloadPreview"])
         self.assertEqual(preview["sources"][0]["id"], document_id)
+        self.assertEqual(preview["historyEntry"]["sourceCount"], 1)
+        history = self.app.state.database.list_agent_task_history()
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["taskCode"], "consolidate-files")
+        with closing(sqlite3.connect(self.data_directory / "officeai.sqlite3")) as connection, connection:
+            history_columns = {row[1] for row in connection.execute("PRAGMA table_info(agent_task_history)")}
+            persisted_row = connection.execute("SELECT * FROM agent_task_history").fetchone()
+        self.assertNotIn("instruction", history_columns)
+        self.assertNotIn("payload", history_columns)
+        self.assertNotIn(source_text, repr(persisted_row))
 
     def test_xlsx_preview_includes_saved_values_but_skips_formulas_and_cached_results(self) -> None:
         original = self.office_fixture(
