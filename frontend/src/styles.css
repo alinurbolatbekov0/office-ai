@@ -315,6 +315,11 @@ button { font: inherit; }
 .agent-document-picker { border: 1px solid #eceef2; border-radius: 8px; max-height: 230px; overflow: auto; padding: 8px; }
 .agent-picker-heading { align-items: center; color: #525866; display: flex; font-size: 9px; justify-content: space-between; padding: 3px 2px 7px; }
 .agent-picker-heading span { color: #959daa; font-weight: 400; }
+.agent-document-search { display: flex; gap: 6px; margin: 7px 0; }
+.agent-document-search input { background: #fbfbfd; border: 1px solid #e8eaf0; border-radius: 6px; color: #535a68; flex: 1; font: inherit; font-size: 9px; min-width: 0; padding: 8px; }
+.agent-document-search button, .agent-load-more { background: #f4f3ff; border: 1px solid #e7e5ff; border-radius: 6px; color: #5b53c8; cursor: pointer; font-size: 9px; padding: 7px 10px; }
+.agent-load-more { margin-top: 8px; width: 100%; }
+.agent-document-search button:disabled, .agent-load-more:disabled { cursor: wait; opacity: .6; }
 .agent-document-option { align-items: center; border-top: 1px solid #f0f1f4; cursor: pointer; display: flex; gap: 9px; min-width: 0; padding: 8px 2px; }
 .agent-document-option input { accent-color: #655ce0; flex: 0 0 auto; }
 .agent-document-name { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
