@@ -324,6 +324,13 @@ button { font: inherit; }
 .agent-input-form .primary-button { align-self: flex-start; font-size: 10px; margin-top: 3px; }
 .agent-error { background: #fff0f0; border: 1px solid #f1cccc; border-radius: 8px; color: #a2444a; font-size: 10px; line-height: 1.6; margin-top: 12px; padding: 10px 12px; }
 .agent-preview-card { margin-top: 14px; }
+.agent-history-card { background: #fff; border: 1px solid #ebedf1; border-radius: 11px; margin-top: 14px; padding: 19px; }
+.agent-history-list { list-style: none; margin: 10px 0 0; padding: 0; }
+.agent-history-list li { align-items: center; border-top: 1px solid #f0f1f4; display: flex; justify-content: space-between; gap: 16px; padding: 10px 2px; }
+.agent-history-list strong, .agent-history-list small { display: block; }
+.agent-history-list strong { color: #444b59; font-size: 10px; }
+.agent-history-list small, .agent-history-list time { color: #969daa; font-size: 9px; margin-top: 4px; }
+.agent-history-list time { flex: 0 0 auto; }
 .agent-preview-sources { display: flex; flex-direction: column; gap: 7px; list-style: none; margin: 15px 0; padding: 0; }
 .agent-preview-sources li { display: flex; flex-direction: column; gap: 4px; }
 .agent-preview-sources strong { color: #535a68; font-size: 10px; }
@@ -337,6 +344,7 @@ button { font: inherit; }
 button:focus-visible { outline: 3px solid #8179ed; outline-offset: 2px; }
 
 :root[data-theme="dark"] .agent-workspace-card { background: #1c202b; border-color: #2c3240; }
+:root[data-theme="dark"] .agent-history-card { background: #1c202b; border-color: #2c3240; }
 :root[data-theme="dark"] .agent-page-heading h1,
 :root[data-theme="dark"] .workspace-card-heading h2,
 :root[data-theme="dark"] .agent-empty-stage strong,
