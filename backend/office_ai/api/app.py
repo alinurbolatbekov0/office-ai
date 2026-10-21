@@ -158,9 +158,17 @@ def create_app(
                 document_ids=payload.document_ids,
                 instruction=payload.instruction,
             )
+            history_entry = app.state.database.record_agent_preview(
+                result["agentId"], result["taskCode"], len(result["sources"])
+            )
+            result["historyEntry"] = history_entry
             return JSONResponse(result)
         except InvalidDocumentPreview as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.get(f"{API_PREFIX}/agents/history")
+    async def agent_history(limit: int = Query(default=20, ge=1, le=100)) -> dict[str, list[dict[str, Any]]]:
+        return {"history": app.state.database.list_agent_task_history(limit)}
 
     @app.get(f"{API_PREFIX}/settings")
     async def settings() -> dict[str, dict[str, Any]]:
