@@ -32,6 +32,19 @@ try {
     $smoke.Refresh()
     if ($smoke.ExitCode -ne 0) { throw "Packaged application self-test failed with exit code $($smoke.ExitCode)" }
 
+    # Exercise actual WebView2 creation and wait for the SPA's load event.
+    $guiSmoke = Start-Process -FilePath $app -ArgumentList "--gui-smoke-test" -PassThru
+    if (-not $guiSmoke.WaitForExit(60000)) {
+        $guiSmoke.Kill()
+        throw "Packaged application did not open and close its WebView2 window within 60 seconds"
+    }
+    $guiSmoke.Refresh()
+    if ($guiSmoke.ExitCode -ne 0) {
+        $startupLog = Join-Path $dataDirectory "logs\startup.log"
+        $details = if (Test-Path $startupLog) { Get-Content $startupLog -Tail 10 | Out-String } else { "No startup log was written" }
+        throw "Packaged WebView2 GUI smoke test failed with exit code $($guiSmoke.ExitCode). $details"
+    }
+
     $uninstaller = Join-Path $InstallDirectory "unins000.exe"
     if (-not (Test-Path $uninstaller)) { throw "Uninstaller was not installed" }
     $uninstall = Start-Process -FilePath $uninstaller -ArgumentList @(
