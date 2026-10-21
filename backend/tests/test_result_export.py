@@ -48,7 +48,10 @@ class AgentResultExportTests(unittest.TestCase):
         self.assertIn("синтетические данные", sheet["B3"].value)
 
     def test_presentation_export_contains_only_text_shapes(self) -> None:
-        history_id = self._save_result("powerpoint-presentations", "План\nПервый тезис\nВторой тезис")
+        history_id = self._save_result(
+            "powerpoint-presentations",
+            "Слайд 1 — План\n- Первый тезис\n- Второй тезис\nСлайд 2 — Итоги\n- Синтетический вывод",
+        )
         rendered = AgentResultExporter(self.database).render(history_id)
 
         presentation = Presentation(BytesIO(rendered.content))
@@ -56,7 +59,7 @@ class AgentResultExportTests(unittest.TestCase):
         self.assertTrue(rendered.filename.endswith(".pptx"))
         self.assertTrue(any("План" in text for text in slide_text))
         self.assertTrue(any("Первый тезис" in text for text in slide_text))
-        self.assertEqual(len(presentation.slides), 1)
+        self.assertEqual(len(presentation.slides), 2)
 
     def test_missing_result_and_oversized_presentation_are_rejected(self) -> None:
         history = self.database.record_agent_preview("powerpoint-presentations", "synthetic-task", 1)
