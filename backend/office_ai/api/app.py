@@ -20,6 +20,7 @@ from office_ai.application.backups import BackupService, InvalidBackup, MAX_BACK
 from office_ai.application.document_library import DocumentLibrary
 from office_ai.application.operation_journal import read_recent_operations
 from office_ai.application.settings import read_settings, update_setting
+from office_ai.domain.agents.task_catalog import serialize_agent_tasks
 from office_ai.domain.settings import InvalidSetting
 from office_ai.infrastructure.database import LocalDatabase
 from office_ai.infrastructure.storage_paths import get_user_data_directory
@@ -122,6 +123,13 @@ def create_app(
     @app.get(f"{API_PREFIX}/agents")
     async def agents() -> dict[str, list[dict[str, str]]]:
         return {"agents": list_agents()}
+
+    @app.get(f"{API_PREFIX}/agents/{{agent_id}}/tasks")
+    async def agent_tasks(agent_id: str) -> dict[str, list[dict[str, object]]]:
+        tasks = serialize_agent_tasks(agent_id)
+        if not tasks:
+            raise HTTPException(status_code=404, detail="Агент не найден.")
+        return {"tasks": tasks}
 
     @app.get(f"{API_PREFIX}/settings")
     async def settings() -> dict[str, dict[str, Any]]:
