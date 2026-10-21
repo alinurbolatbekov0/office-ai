@@ -5,5 +5,5 @@ from office_ai.domain.agents.models import AgentDescriptor
 AGENT = AgentDescriptor(
     id="document-management",
     title="Документооборот",
-    description="Помощник для работы с документами и шаблонами.",
+    description="Черновики документов, сводки и проверка материалов по выбранным файлам.",
 )

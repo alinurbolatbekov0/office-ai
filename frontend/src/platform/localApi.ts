@@ -7,6 +7,73 @@ export interface AgentDescriptor {
   status: "prepared";
 }
 
+export interface AgentTask {
+  agent_id: string;
+  code: string;
+  title: string;
+  purpose: string;
+  allowed_categories: string[];
+}
+
+export interface AgentPreviewSource {
+  id: string;
+  name: string;
+  category: string;
+  text: string;
+}
+
+export interface AgentTaskPreview {
+  agentId: string;
+  taskCode: string;
+  taskTitle: string;
+  purpose: string;
+  sources: AgentPreviewSource[];
+  payloadPreview: string;
+  payloadCharacters: number;
+  historyEntry?: AgentTaskHistoryEntry;
+}
+
+export interface AgentTaskHistoryEntry {
+  id: string;
+  agentId: string;
+  taskCode: string;
+  outcome: "preview_ready";
+  sourceCount: number;
+  hasResult: boolean;
+  createdAt: string;
+}
+
+export interface AIProviderStatus {
+  providerAvailable: boolean;
+  configured: boolean;
+  providerId: "openai";
+  modelId: string;
+}
+
+export interface AgentTransferDisclosure {
+  requestId: string;
+  providerId: "openai";
+  modelId: string;
+  agentId: string;
+  taskCode: string;
+  purpose: string;
+  items: Array<{ id: string; name: string; categories: string[] }>;
+  payloadPreview: string;
+  payloadSizeBytes: number;
+  payloadSha256: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface AgentTaskResult {
+  id: string;
+  historyId: string;
+  providerId: "openai";
+  modelId: string;
+  resultText: string;
+  createdAt: string;
+}
+
 export interface HealthStatus {
   status: "ok";
   application: string;
@@ -45,6 +112,8 @@ export interface DocumentFilters {
   importedTo?: string;
   sortBy?: "name" | "imported_at" | "size_bytes" | "type";
   sortOrder?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
 }
 
 export interface BackupFile {
@@ -86,7 +155,7 @@ export async function getDocuments(
   config: RuntimeConfig,
   filters: DocumentFilters = {},
 ): Promise<{ documents: LibraryDocument[]; total: number }> {
-  const query = new URLSearchParams({ limit: "50", offset: "0" });
+  const query = new URLSearchParams({ limit: String(filters.limit ?? 50), offset: String(filters.offset ?? 0) });
   if (filters.search) query.set("search", filters.search);
   if (filters.type) query.set("type", filters.type);
   if (filters.importedFrom) query.set("imported_from", filters.importedFrom);
@@ -203,6 +272,111 @@ export function getHealth(config: RuntimeConfig): Promise<HealthStatus> {
 export async function getAgents(config: RuntimeConfig): Promise<AgentDescriptor[]> {
   const response = await request<{ agents: AgentDescriptor[] }>(config, "agents");
   return response.agents;
+}
+
+export async function getAgentTasks(config: RuntimeConfig, agentId: string): Promise<AgentTask[]> {
+  const response = await request<{ tasks: AgentTask[] }>(config, `agents/${encodeURIComponent(agentId)}/tasks`);
+  return response.tasks;
+}
+
+export async function getAgentTaskHistory(config: RuntimeConfig): Promise<AgentTaskHistoryEntry[]> {
+  const response = await request<{ history: AgentTaskHistoryEntry[] }>(config, "agents/history?limit=20");
+  return response.history;
+}
+
+export async function getAIProviderStatus(config: RuntimeConfig): Promise<AIProviderStatus> {
+  return request(config, "ai/status");
+}
+
+export async function saveOpenAIApiKey(config: RuntimeConfig, apiKey: string): Promise<void> {
+  await postJson<{ configured: boolean }>(config, "ai/key", { api_key: apiKey });
+}
+
+export async function deleteOpenAIApiKey(config: RuntimeConfig): Promise<void> {
+  await postJson<{ configured: boolean }>(config, "ai/key/delete", {});
+}
+
+export async function prepareAgentTransfer(
+  config: RuntimeConfig,
+  agentId: string,
+  taskCode: string,
+  documentIds: string[],
+  instruction: string,
+  historyId: string,
+): Promise<AgentTransferDisclosure> {
+  return postJson(config, `agents/${encodeURIComponent(agentId)}/tasks/${encodeURIComponent(taskCode)}/prepare-transfer`, {
+    document_ids: documentIds,
+    instruction,
+    history_id: historyId,
+  });
+}
+
+export async function executeAgentTransfer(
+  config: RuntimeConfig,
+  requestId: string,
+  confirmed: boolean,
+): Promise<{ cancelled: boolean; resultText?: string; historyId?: string }> {
+  return postJson(config, `ai/transfer/${encodeURIComponent(requestId)}/execute`, { confirmed });
+}
+
+export async function cancelAgentTransfer(config: RuntimeConfig, requestId: string): Promise<void> {
+  await postJson(config, `ai/transfer/${encodeURIComponent(requestId)}/cancel`, {});
+}
+
+export async function getAgentTaskResult(config: RuntimeConfig, historyId: string): Promise<AgentTaskResult> {
+  return request(config, `agents/history/${encodeURIComponent(historyId)}/result`);
+}
+
+export async function downloadAgentTaskResult(config: RuntimeConfig, historyId: string): Promise<void> {
+  const response = await fetch(`${config.apiBaseUrl}/agents/history/${encodeURIComponent(historyId)}/export`, {
+    headers: { "X-OfficeAI-Token": config.sessionToken },
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? `Не удалось подготовить файл результата (код ${response.status}).`);
+  }
+  const filename = response.headers.get("content-disposition")?.match(/filename="([a-zA-Z0-9._-]+)"/)?.[1] ?? "office-ai-result";
+  const objectUrl = URL.createObjectURL(await response.blob());
+  documentLink(objectUrl, filename).click();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+}
+
+async function postJson<T>(config: RuntimeConfig, resource: string, body: object): Promise<T> {
+  const response = await fetch(`${config.apiBaseUrl}/${resource}`, {
+    method: "POST",
+    headers: { "X-OfficeAI-Token": config.sessionToken, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? `Локальный API ответил с кодом ${response.status}.`);
+  }
+  return response.json() as Promise<T>;
+}
+
+export async function createAgentTaskPreview(
+  config: RuntimeConfig,
+  agentId: string,
+  taskCode: string,
+  documentIds: string[],
+  instruction: string,
+): Promise<AgentTaskPreview> {
+  const response = await fetch(
+    `${config.apiBaseUrl}/agents/${encodeURIComponent(agentId)}/tasks/${encodeURIComponent(taskCode)}/preview`,
+    {
+      method: "POST",
+      headers: { "X-OfficeAI-Token": config.sessionToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ document_ids: documentIds, instruction }),
+      cache: "no-store",
+    },
+  );
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? `Не удалось подготовить предпросмотр (код ${response.status}).`);
+  }
+  return response.json() as Promise<AgentTaskPreview>;
 }
 
 export async function getSettings(config: RuntimeConfig): Promise<AppSettings> {

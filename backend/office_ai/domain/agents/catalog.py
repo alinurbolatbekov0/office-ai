@@ -1,4 +1,4 @@
-"""Read-only registry for the four planned agents."""
+"""Read-only registry for the four independent agent modules."""
 
 from dataclasses import asdict
 
@@ -10,7 +10,7 @@ from office_ai.domain.agents.powerpoint_presentations import AGENT as powerpoint
 
 
 def get_agent_descriptors() -> tuple[AgentDescriptor, ...]:
-    # The independent modules currently expose metadata only.
+    # Task behavior is owned by each module; this registry exposes navigation metadata.
     return (
         document_management,
         business_correspondence,

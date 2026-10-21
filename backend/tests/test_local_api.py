@@ -17,9 +17,12 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import io
 
 from fastapi import FastAPI
+from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
-from office_ai.api.app import create_app
+from office_ai.api.app import AgentPreviewRequest, AgentTransferConfirmRequest, AgentTransferPrepareRequest, create_app
 from office_ai.application.backups import BackupService, InvalidBackup
+from office_ai.application.document_preview import InvalidDocumentPreview
 from office_ai.domain.documents import InvalidDocument
 from office_ai.desktop import DesktopBridge, RuntimeConfig, _start_backend
 from office_ai.infrastructure.database import LocalDatabase
@@ -137,6 +140,16 @@ class LocalApiSecurityTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["status"], "ok")
 
+        same_origin_without_origin_header = {
+            key: value for key, value in self.headers.items() if key != "origin"
+        }
+        status, body, response_headers = self.request(
+            "/api/v1/health", same_origin_without_origin_header
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["status"], "ok")
+        self.assertNotIn("access-control-allow-origin", response_headers)
+
         missing_token = {key: value for key, value in self.headers.items() if key != "x-officeai-token"}
         self.assertEqual(self.request("/api/v1/health", missing_token)[0], 403)
 
@@ -171,15 +184,18 @@ class LocalApiSecurityTests(unittest.TestCase):
         unsafe_headers = {**headers, "access-control-request-headers": "authorization"}
         self.assertEqual(self.request("/api/v1/health", unsafe_headers, method="OPTIONS")[0], 403)
 
+        missing_origin = {key: value for key, value in headers.items() if key != "origin"}
+        self.assertEqual(self.request("/api/v1/health", missing_origin, method="OPTIONS")[0], 403)
+
     def test_schema_is_versioned_and_database_stays_under_injected_user_data_root(self) -> None:
         database_path = self.data_directory / "officeai.sqlite3"
         self.assertTrue(database_path.is_file())
         self.assertEqual(database_path.parent, self.data_directory)
         with closing(sqlite3.connect(database_path)) as connection, connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
             self.assertEqual(
                 connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
-                2,
+                4,
             )
             self.assertIn(
                 "documents",
@@ -209,10 +225,10 @@ class LocalApiSecurityTests(unittest.TestCase):
         database.initialize()
         self.assertEqual(database.get_settings()["theme"], "dark")
         with closing(sqlite3.connect(database_path)) as connection, connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
             self.assertEqual(
                 [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")],
-                [1, 2],
+                [1, 2, 3, 4],
             )
 
     def test_windows_data_directory_uses_local_app_data(self) -> None:
@@ -281,6 +297,52 @@ class LocalApiSecurityTests(unittest.TestCase):
         if confirm_duplicate:
             headers["x-officeai-confirm-duplicate"] = "true"
         return self.request("/api/v1/documents", headers, method="POST", body=contents)
+
+    @staticmethod
+    def office_fixture(extension: str, parts: dict[str, str]) -> bytes:
+        required_parts = {
+            "docx": "word/document.xml",
+            "xlsx": "xl/workbook.xml",
+            "pptx": "ppt/presentation.xml",
+        }
+        buffer = io.BytesIO()
+        with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
+            archive.writestr("[Content_Types].xml", "<Types/>")
+            if required_parts[extension] not in parts:
+                archive.writestr(required_parts[extension], "<root/>")
+            for name, content in parts.items():
+                archive.writestr(name, content)
+        return buffer.getvalue()
+
+    @staticmethod
+    def pdf_fixture(text: str | None) -> bytes:
+        writer = PdfWriter()
+        page = writer.add_blank_page(width=612, height=792)
+        if text:
+            font = DictionaryObject()
+            font[NameObject("/F1")] = writer._add_object(
+                DictionaryObject({
+                    NameObject("/Type"): NameObject("/Font"),
+                    NameObject("/Subtype"): NameObject("/Type1"),
+                    NameObject("/BaseFont"): NameObject("/Helvetica"),
+                })
+            )
+            page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): font})
+            stream = DecodedStreamObject()
+            escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            stream.set_data(f"BT /F1 12 Tf 72 720 Td ({escaped}) Tj ET".encode("ascii"))
+            page[NameObject("/Contents")] = writer._add_object(stream)
+        output = io.BytesIO()
+        writer.write(output)
+        return output.getvalue()
+
+    def preview(self, agent: str, task: str, document_ids: list[str], instruction: str = "") -> dict[str, object]:
+        return self.app.state.document_preview.create(
+            agent_id=agent,
+            task_code=task,
+            document_ids=document_ids,
+            instruction=instruction,
+        )
 
     def test_upload_detects_duplicates_and_requires_explicit_confirmation(self) -> None:
         original = b"%PDF-1.7\nsynthetic anonymized test fixture\n%%EOF"
@@ -408,10 +470,256 @@ class LocalApiSecurityTests(unittest.TestCase):
         self.assertEqual(status, 201)
         self.assertEqual(json.loads(body)["document"]["type"], "DOCX")
 
+    def test_docx_agent_preview_is_local_read_only_and_not_journaled(self) -> None:
+        source_text = "Құжаттың синтетикалық мәтіні / Текст синтетического документа"
+        original = self.office_fixture(
+            "docx",
+            {
+                "word/document.xml": (
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                    f"<w:body><w:p><w:r><w:t>{source_text}</w:t></w:r></w:p></w:body></w:document>"
+                )
+            },
+        )
+        status, uploaded, _ = self.upload("Synthetic.docx", original)
+        self.assertEqual(status, 201)
+        document = json.loads(uploaded)["document"]
+        stored_path, _ = self.app.state.document_library.get_download(document["id"])
+        before = stored_path.read_bytes()
+
+        result = self.preview(
+            "document-management",
+            "consolidate-files",
+            [document["id"]],
+            "Кратко перечисли ключевые сведения",
+        )
+
+        self.assertIn(source_text, result["payloadPreview"])
+        self.assertIn("Кратко перечисли ключевые сведения", result["payloadPreview"])
+        self.assertEqual(stored_path.read_bytes(), before)
+        self.assertEqual(list((self.data_directory / "documents").glob("*.bin")), [stored_path])
+        _, journal_body, _ = self.request("/api/v1/operations", self.headers)
+        self.assertNotIn(source_text, journal_body.decode())
+
+    def test_agent_preview_api_handler_returns_the_service_preview(self) -> None:
+        source_text = "Синтетический фрагмент для теста API"
+        original = self.office_fixture(
+            "docx",
+            {
+                "word/document.xml": (
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                    f"<w:body><w:p><w:r><w:t>{source_text}</w:t></w:r></w:p></w:body></w:document>"
+                )
+            },
+        )
+        status, uploaded, _ = self.upload("Synthetic API.docx", original)
+        self.assertEqual(status, 201)
+        document_id = json.loads(uploaded)["document"]["id"]
+        route_path = "/api/v1/agents/{agent_id}/tasks/{task_code}/preview"
+        route = next(route for route in self.app.routes if getattr(route, "path", None) == route_path)
+        payload = AgentPreviewRequest(document_ids=[document_id], instruction="Только локальная подготовка")
+
+        response = route.endpoint("document-management", "consolidate-files", payload)
+
+        self.assertEqual(response.status_code, 200)
+        preview = json.loads(response.body)
+        self.assertIn(source_text, preview["payloadPreview"])
+        self.assertEqual(preview["sources"][0]["id"], document_id)
+        self.assertEqual(preview["historyEntry"]["sourceCount"], 1)
+        history = self.app.state.database.list_agent_task_history()
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["taskCode"], "consolidate-files")
+        with closing(sqlite3.connect(self.data_directory / "officeai.sqlite3")) as connection, connection:
+            history_columns = {row[1] for row in connection.execute("PRAGMA table_info(agent_task_history)")}
+            persisted_row = connection.execute("SELECT * FROM agent_task_history").fetchone()
+        self.assertNotIn("instruction", history_columns)
+        self.assertNotIn("payload", history_columns)
+        self.assertNotIn(source_text, repr(persisted_row))
+
+    def test_ai_transfer_api_requires_an_explicit_confirmation_and_stores_only_result(self) -> None:
+        source_text = "Synthetic approved-only source"
+        original = self.office_fixture(
+            "docx",
+            {
+                "word/document.xml": (
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                    f"<w:body><w:p><w:r><w:t>{source_text}</w:t></w:r></w:p></w:body></w:document>"
+                )
+            },
+        )
+        status, uploaded, _ = self.upload("Synthetic approval.docx", original)
+        self.assertEqual(status, 201)
+        document_id = json.loads(uploaded)["document"]["id"]
+        preview = self.preview("document-management", "consolidate-files", [document_id])
+        history = self.app.state.database.record_agent_preview(
+            "document-management", "consolidate-files", len(preview["sources"])
+        )
+
+        class FakeCredentials:
+            def read_api_key(self):
+                return "sk-synthetic-api-key-for-tests-only"
+
+            def save_api_key(self, _value):
+                raise AssertionError("Test must not save a real API key")
+
+            def delete_api_key(self):
+                return None
+
+        class FakeProvider:
+            def __init__(self):
+                self.calls = []
+
+            def generate(self, payload, api_key):
+                self.calls.append((payload, api_key))
+                return "Synthetic AI draft"
+
+        self.app.state.credential_store = FakeCredentials()
+        self.app.state.openai_adapter = FakeProvider()
+        self.app.state.agent_request_service = None
+        prepare_route = next(
+            route for route in self.app.routes
+            if getattr(route, "path", None) == "/api/v1/agents/{agent_id}/tasks/{task_code}/prepare-transfer"
+        )
+        execute_route = next(
+            route for route in self.app.routes
+            if getattr(route, "path", None) == "/api/v1/ai/transfer/{request_id}/execute"
+        )
+        request = AgentTransferPrepareRequest(
+            document_ids=[document_id], history_id=history["id"]
+        )
+        manifest = prepare_route.endpoint("document-management", "consolidate-files", request)
+        self.assertEqual(self.app.state.openai_adapter.calls, [])
+        self.assertEqual(manifest["providerId"], "openai")
+        self.assertIn(source_text, manifest["payloadPreview"])
+        self.assertNotIn("sk-synthetic-api-key", manifest["payloadPreview"])
+
+        cancelled = execute_route.endpoint(
+            manifest["requestId"], AgentTransferConfirmRequest(confirmed=False)
+        )
+        self.assertTrue(cancelled["cancelled"])
+        self.assertEqual(self.app.state.openai_adapter.calls, [])
+
+        manifest = prepare_route.endpoint("document-management", "consolidate-files", request)
+        result = execute_route.endpoint(
+            manifest["requestId"], AgentTransferConfirmRequest(confirmed=True)
+        )
+        self.assertEqual(len(self.app.state.openai_adapter.calls), 1)
+        self.assertEqual(result["resultText"], "Synthetic AI draft")
+        self.assertEqual(
+            self.app.state.database.get_agent_task_result(history["id"])["resultText"],
+            "Synthetic AI draft",
+        )
+        export_status, exported_body, export_headers = self.request(
+            f"/api/v1/agents/history/{history['id']}/export", self.headers
+        )
+        self.assertEqual(export_status, 200)
+        self.assertIn("application/vnd.openxmlformats-officedocument.wordprocessingml.document", export_headers["content-type"])
+        self.assertTrue(exported_body.startswith(b"PK"))
+        with closing(sqlite3.connect(self.data_directory / "officeai.sqlite3")) as connection, connection:
+            saved_request = connection.execute(
+                "SELECT result_text FROM agent_task_results"
+            ).fetchone()[0]
+        self.assertEqual(saved_request, "Synthetic AI draft")
+        self.assertNotIn(source_text, saved_request)
+
+    def test_xlsx_preview_includes_saved_values_but_skips_formulas_and_cached_results(self) -> None:
+        original = self.office_fixture(
+            "xlsx",
+            {
+                "xl/sharedStrings.xml": (
+                    '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                    "<si><t>Синтетический доход</t></si></sst>"
+                ),
+                "xl/worksheets/sheet1.xml": (
+                    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                    "<sheetData><row r=\"1\"><c r=\"A1\" t=\"s\"><v>0</v></c>"
+                    "<c r=\"A2\"><f>SUM(A1:A1)</f><v>987654</v></c></row></sheetData></worksheet>"
+                ),
+            },
+        )
+        status, uploaded, _ = self.upload("Synthetic.xlsx", original)
+        self.assertEqual(status, 201)
+        document_id = json.loads(uploaded)["document"]["id"]
+
+        result = self.preview("excel-analytics", "summarize-workbook", [document_id])
+
+        preview_text = result["payloadPreview"]
+        self.assertIn("Синтетический доход", preview_text)
+        self.assertNotIn("SUM(", preview_text)
+        self.assertNotIn("987654", preview_text)
+
+    def test_pptx_preview_orders_slides_by_number(self) -> None:
+        drawing = "http://schemas.openxmlformats.org/drawingml/2006/main"
+        original = self.office_fixture(
+            "pptx",
+            {
+                "ppt/slides/slide2.xml": f'<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="{drawing}"><a:t>Слайд второй</a:t></p:sld>',
+                "ppt/slides/slide1.xml": f'<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="{drawing}"><a:t>Слайд первый</a:t></p:sld>',
+            },
+        )
+        status, uploaded, _ = self.upload("Synthetic.pptx", original)
+        self.assertEqual(status, 201)
+        document_id = json.loads(uploaded)["document"]["id"]
+
+        result = self.preview("powerpoint-presentations", "draft-speaker-notes", [document_id])
+
+        preview_text = result["payloadPreview"]
+        self.assertLess(preview_text.index("Слайд первый"), preview_text.index("Слайд второй"))
+
+    def test_preview_rejects_xml_entities_malformed_pdf_and_wrong_task_category(self) -> None:
+        unsafe_xml = (
+            '<!DOCTYPE w:document [<!ENTITY local SYSTEM "file:///not-read">]>'
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            "<w:body><w:p><w:r><w:t>&local;</w:t></w:r></w:p></w:body></w:document>"
+        )
+        status, uploaded, _ = self.upload(
+            "Unsafe.docx",
+            self.office_fixture("docx", {"word/document.xml": unsafe_xml}),
+        )
+        self.assertEqual(status, 201)
+        unsafe_id = json.loads(uploaded)["document"]["id"]
+        with self.assertRaises(InvalidDocumentPreview):
+            self.preview("document-management", "consolidate-files", [unsafe_id])
+
+        status, uploaded, _ = self.upload("Synthetic.pdf", b"%PDF-1.7\nsynthetic fixture\n%%EOF")
+        self.assertEqual(status, 201)
+        pdf_id = json.loads(uploaded)["document"]["id"]
+        with self.assertRaises(InvalidDocumentPreview):
+            self.preview("document-management", "consolidate-files", [pdf_id])
+        with self.assertRaises(InvalidDocumentPreview):
+            self.preview("excel-analytics", "summarize-workbook", [unsafe_id])
+
+    def test_text_pdf_preview_is_local_and_scanned_pdf_is_rejected_without_ocr(self) -> None:
+        source_text = "Synthetic PDF text"
+        original = self.pdf_fixture(source_text)
+        status, uploaded, _ = self.upload("Synthetic.pdf", original)
+        self.assertEqual(status, 201)
+        document_id = json.loads(uploaded)["document"]["id"]
+        path, _ = self.app.state.document_library.get_download(document_id)
+        before = path.read_bytes()
+
+        result = self.preview("document-management", "consolidate-files", [document_id])
+
+        self.assertIn(source_text, result["payloadPreview"])
+        self.assertIn("Страница 1", result["payloadPreview"])
+        self.assertEqual(before, path.read_bytes())
+
+        status, uploaded, _ = self.upload("Scanned.pdf", self.pdf_fixture(None))
+        self.assertEqual(status, 201)
+        scanned_id = json.loads(uploaded)["document"]["id"]
+        with self.assertRaisesRegex(InvalidDocumentPreview, "OCR отключён"):
+            self.preview("document-management", "consolidate-files", [scanned_id])
+
     def test_backup_round_trip_restores_database_and_original_documents(self) -> None:
         original = b"%PDF-1.7\nsynthetic backup fixture\n%%EOF"
         status, body, _ = self.upload("Архив Құжат.pdf", original)
         self.assertEqual(status, 201)
+        history = self.app.state.database.record_agent_preview(
+            "document-management", "check-completeness", 1
+        )
+        self.app.state.database.save_agent_task_result(
+            history["id"], "openai", "gpt-4.1-mini", "Synthetic saved result"
+        )
         service: BackupService = self.app.state.backup_service
         backup = service.create_backup()
         archive_path = self.data_directory / "backups" / f"{backup['id']}.zip"
@@ -430,6 +738,11 @@ class LocalApiSecurityTests(unittest.TestCase):
         restored = next((self.data_directory / "documents").glob("*.bin"))
         self.assertEqual(restored.read_bytes(), original)
         self.assertEqual(self.app.state.document_library.query()[1], 1)
+        self.assertEqual(len(self.app.state.database.list_agent_task_history()), 1)
+        self.assertEqual(
+            self.app.state.database.get_agent_task_result(history["id"])["resultText"],
+            "Synthetic saved result",
+        )
         with closing(sqlite3.connect(self.data_directory / "officeai.sqlite3")) as connection, connection:
             operation_codes = {row[0] for row in connection.execute("SELECT operation_code FROM operation_log")}
         self.assertIn("backup_restored", operation_codes)

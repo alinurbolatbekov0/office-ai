@@ -5,5 +5,5 @@ from office_ai.domain.agents.models import AgentDescriptor
 AGENT = AgentDescriptor(
     id="business-correspondence",
     title="Деловая переписка",
-    description="Подготовка деловых писем и ответов без их отправки.",
+    description="Черновики деловых писем, ответов и сопроводительных текстов без отправки.",
 )

@@ -172,18 +172,33 @@ def _open_window(url: str, bridge: DesktopBridge, *, debug: bool, smoke_test: bo
         min_size=(920, 640),
     )
     page_loaded = threading.Event()
+    page_ready = threading.Event()
     if smoke_test:
-        def close_after_page_load() -> None:
-            page_loaded.set()
-            # Let WebView2 finish its first paint before closing the temporary window.
-            timer = threading.Timer(0.5, window.destroy)
-            timer.daemon = True
-            timer.start()
+        def wait_for_react_and_backend() -> None:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    if window.evaluate_js(
+                        "document.querySelector('.app-shell[data-backend-ready=true]') !== null"
+                    ):
+                        page_ready.set()
+                        break
+                except Exception:
+                    # The page may not have finished creating its WebView2 document yet.
+                    pass
+                time.sleep(0.2)
+            window.destroy()
 
-        window.events.loaded += close_after_page_load
+        def on_page_loaded() -> None:
+            page_loaded.set()
+            threading.Thread(target=wait_for_react_and_backend, daemon=True).start()
+
+        window.events.loaded += on_page_loaded
     webview.start(debug=debug)
     if smoke_test and not page_loaded.is_set():
         raise RuntimeError("Окно WebView2 закрылось до загрузки интерфейса.")
+    if smoke_test and not page_ready.is_set():
+        raise RuntimeError("React-интерфейс не подтвердил подключение к локальному backend.")
 
 
 def _webview2_runtime_found() -> bool:

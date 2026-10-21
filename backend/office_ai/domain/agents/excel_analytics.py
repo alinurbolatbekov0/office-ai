@@ -5,5 +5,5 @@ from office_ai.domain.agents.models import AgentDescriptor
 AGENT = AgentDescriptor(
     id="excel-analytics",
     title="Excel-аналитика",
-    description="Подготовка к анализу таблиц и формированию выводов.",
+    description="Сводки, сравнение периодов и черновые выводы по выбранным значениям XLSX.",
 )
