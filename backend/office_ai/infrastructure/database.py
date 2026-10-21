@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 from office_ai.domain.settings import DEFAULT_SETTINGS, SettingValue, validate_setting
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_OPERATION_LIMIT = 100
 _ALLOWED_OPERATION_CODES = {
     "app_started",
@@ -23,6 +23,7 @@ _ALLOWED_OPERATION_CODES = {
     "backup_created",
     "backup_restored",
     "backup_restore_rejected",
+    "agent_preview_created",
 }
 _ALLOWED_MESSAGE_CODES = {
     "app_started",
@@ -33,6 +34,7 @@ _ALLOWED_MESSAGE_CODES = {
     "backup_created",
     "backup_restored",
     "backup_restore_rejected",
+    "agent_preview_created",
 }
 
 
@@ -161,6 +163,32 @@ class LocalDatabase:
                     (2, _utc_now()),
                 )
                 connection.execute("PRAGMA user_version = 2")
+
+            if version < 3:
+                if version >= 2:
+                    connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """
+                    CREATE TABLE agent_task_history (
+                        id TEXT PRIMARY KEY,
+                        agent_id TEXT NOT NULL CHECK (agent_id IN
+                            ('document-management', 'business-correspondence',
+                             'excel-analytics', 'powerpoint-presentations')),
+                        task_code TEXT NOT NULL,
+                        outcome TEXT NOT NULL CHECK (outcome IN ('preview_ready')),
+                        source_count INTEGER NOT NULL CHECK (source_count BETWEEN 1 AND 5),
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    "CREATE INDEX agent_task_history_created_idx ON agent_task_history(created_at DESC)"
+                )
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (3, _utc_now()),
+                )
+                connection.execute("PRAGMA user_version = 3")
 
     def get_settings(self) -> dict[str, SettingValue]:
         with self._connect() as connection:
@@ -429,6 +457,43 @@ class LocalDatabase:
             """,
             (str(uuid4()), _utc_now(), operation_code, outcome, entity_type, entity_id, message_code),
         )
+
+    def record_agent_preview(self, agent_id: str, task_code: str, source_count: int) -> dict[str, Any]:
+        """Persist minimal task history; never persist the prompt or document content."""
+        allowed_agents = {
+            "document-management", "business-correspondence",
+            "excel-analytics", "powerpoint-presentations",
+        }
+        if agent_id not in allowed_agents or not task_code or len(task_code) > 80:
+            raise ValueError("Unsupported agent task")
+        if not 1 <= source_count <= 5:
+            raise ValueError("Unsupported source count")
+        run_id = str(uuid4())
+        created_at = _utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO agent_task_history
+                   (id, agent_id, task_code, outcome, source_count, created_at)
+                   VALUES (?, ?, ?, 'preview_ready', ?, ?)""",
+                (run_id, agent_id, task_code, source_count, created_at),
+            )
+            self._insert_operation(
+                connection, "agent_preview_created", "success", None, None, "agent_preview_created"
+            )
+        return {"id": run_id, "agentId": agent_id, "taskCode": task_code,
+                "outcome": "preview_ready", "sourceCount": source_count, "createdAt": created_at}
+
+    def list_agent_task_history(self, limit: int = 50) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(int(limit), 100))
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT id, agent_id, task_code, outcome, source_count, created_at
+                   FROM agent_task_history ORDER BY created_at DESC, id DESC LIMIT ?""",
+                (bounded_limit,),
+            ).fetchall()
+        return [{"id": row["id"], "agentId": row["agent_id"], "taskCode": row["task_code"],
+                 "outcome": row["outcome"], "sourceCount": row["source_count"], "createdAt": row["created_at"]}
+                for row in rows]
 
     def list_operations(self, limit: int = 50) -> list[dict[str, Any]]:
         bounded_limit = max(1, min(int(limit), MAX_OPERATION_LIMIT))
