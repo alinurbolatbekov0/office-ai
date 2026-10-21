@@ -16,6 +16,7 @@ from office_ai.domain.agents.consent import (
     TransferManifest,
     TransferReceipt,
 )
+from office_ai.domain.agents.task_catalog import get_agent_task
 
 REQUEST_LIFETIME: Final = timedelta(minutes=10)
 RECEIPT_LIFETIME: Final = timedelta(minutes=5)
@@ -64,12 +65,15 @@ class AgentTransferConsent:
         issued = _utc(now)
         if provider_id not in self._allowed_providers:
             raise InvalidTransferDisclosure("Поставщик ИИ не разрешён настройками приложения.")
-        if not agent_id or len(agent_id) > 64 or not task_code or len(task_code) > 64:
-            raise InvalidTransferDisclosure("Не удалось определить агент или тип задачи.")
-        if not purpose or len(purpose) > 500 or any(char in purpose for char in "\r\n"):
-            raise InvalidTransferDisclosure("Не удалось безопасно показать цель передачи данных.")
+        task = get_agent_task(agent_id, task_code)
+        if task is None:
+            raise InvalidTransferDisclosure("Для агента не разрешён такой тип задачи.")
+        if purpose != task.purpose:
+            raise InvalidTransferDisclosure("Цель передачи не совпадает с утверждённым описанием задачи.")
         if not items or len(items) > 100 or len({item.resource_id for item in items}) != len(items):
             raise InvalidTransferDisclosure("Выберите корректный набор данных для просмотра.")
+        if any(not set(item.categories).issubset(task.allowed_categories) for item in items):
+            raise InvalidTransferDisclosure("Задача не разрешает передачу одной из указанных категорий данных.")
         if not isinstance(payload, bytes) or not payload or len(payload) > MAX_TRANSFER_BYTES:
             raise InvalidTransferDisclosure("Размер подготовленных данных не допускается к передаче.")
         try:
