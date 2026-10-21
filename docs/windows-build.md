@@ -11,7 +11,7 @@ Windows-сборка выполняется в GitHub Actions на Windows runne
 3. Frontend собирается в статические файлы, которые включаются в приложение.
 4. PyInstaller собирает Python-приложение, FastAPI, pywebview, Windows engine dependencies и статические ресурсы в Windows-пакет. Для надёжного обнаружения ресурсов используется режим `onedir`; все runtime-файлы лежат рядом с exe.
 5. Inno Setup из образа runner формирует per-user установщик `.exe` в `%LOCALAPPDATA%\Programs\Office AI`; workflow устанавливает его через Chocolatey только если компилятор отсутствует. Права администратора не нужны.
-6. Windows workflow выполняет тихую установку и удаление на свежем runner, проверяет файлы приложения, запускает упакованный `--self-test` (WebView2, локальный API и выдачу SPA) и проверяет сохранность маркера пользовательских данных после удаления. Реальное открытие GUI проверяется вручную, поскольку hosted runner не является целевой интерактивной Windows-сессией.
+6. Windows workflow выполняет тихую установку и удаление на свежем runner, проверяет файлы приложения, запускает упакованный `--self-test` (локальный API и выдачу SPA), затем `--gui-smoke-test`: создаёт WebView2 окно, ждёт событие загрузки интерфейса и автоматически закрывает окно. После удаления проверяется сохранность маркера пользовательских данных. Ручная проверка на Windows 10/11 остаётся обязательной, но CI теперь также ловит ошибки запуска GUI.
 7. CI сохраняет установщик как временный workflow artifact на 14 дней. Публикация релиза не автоматизируется.
 
 Workflow расположен в [`.github/workflows/windows-package.yml`](../.github/workflows/windows-package.yml), сценарий тихой установки — в [`packaging/smoke-installed-package.ps1`](../packaging/smoke-installed-package.ps1).
