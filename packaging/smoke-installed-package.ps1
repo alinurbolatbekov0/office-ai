@@ -24,8 +24,13 @@ try {
     if (-not (Test-Path $app)) { throw "Installed application executable was not found" }
     if (-not (Test-Path $frontend)) { throw "Installed frontend bundle was not found" }
 
-    $help = Start-Process -FilePath $app -ArgumentList "--help" -Wait -PassThru -NoNewWindow
-    if ($help.ExitCode -ne 0) { throw "Bundled application entry point failed its startup check" }
+    $smoke = Start-Process -FilePath $app -ArgumentList "--self-test" -PassThru -NoNewWindow
+    if (-not $smoke.WaitForExit(30000)) {
+        $smoke.Kill()
+        throw "Packaged application failed to serve the local UI/API within 30 seconds"
+    }
+    $smoke.Refresh()
+    if ($smoke.ExitCode -ne 0) { throw "Packaged application self-test failed with exit code $($smoke.ExitCode)" }
 
     $uninstaller = Join-Path $InstallDirectory "unins000.exe"
     if (-not (Test-Path $uninstaller)) { throw "Uninstaller was not installed" }
