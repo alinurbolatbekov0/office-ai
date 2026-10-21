@@ -1,4 +1,7 @@
+import { useState } from "react";
 import type { AppSettings, OperationEvent } from "../platform/localApi";
+import { createBackup, restoreBackup } from "../platform/localApi";
+import type { RuntimeConfig } from "../platform/desktopBridge";
 
 interface SettingsPageProps {
   settings: AppSettings;
@@ -6,6 +9,8 @@ interface SettingsPageProps {
   savingKey: keyof AppSettings | null;
   saveMessage: string | null;
   onSave: (key: keyof AppSettings, value: AppSettings[keyof AppSettings]) => void;
+  runtimeConfig: RuntimeConfig | null;
+  onRestored: () => void;
 }
 
 export default function SettingsPage({
@@ -14,9 +19,47 @@ export default function SettingsPage({
   savingKey,
   saveMessage,
   onSave,
+  runtimeConfig,
+  onRestored,
 }: SettingsPageProps) {
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupMessage, setBackupMessage] = useState<string | null>(null);
+
   function save(key: keyof AppSettings, value: AppSettings[keyof AppSettings]) {
     onSave(key, value);
+  }
+
+  async function handleCreateBackup() {
+    if (!runtimeConfig) return;
+    setBackupBusy(true);
+    setBackupMessage(null);
+    try {
+      const backup = await createBackup(runtimeConfig);
+      setBackupMessage(`Резервная копия создана и сохранена в локальном каталоге backups (${formatBytes(backup.sizeBytes)}).`);
+    } catch (error) {
+      setBackupMessage(error instanceof Error ? error.message : "Не удалось создать резервную копию.");
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  async function handleRestore(file: File | undefined) {
+    if (!runtimeConfig || !file) return;
+    const confirmed = window.confirm(
+      "Восстановление заменит текущую базу Office AI и библиотеку документов данными выбранной резервной копии. Сначала проверьте файл. Продолжить?",
+    );
+    if (!confirmed) return;
+    setBackupBusy(true);
+    setBackupMessage(null);
+    try {
+      await restoreBackup(runtimeConfig, file);
+      setBackupMessage("Данные восстановлены. Обновляем приложение…");
+      window.setTimeout(onRestored, 600);
+    } catch (error) {
+      setBackupMessage(error instanceof Error ? error.message : "Не удалось восстановить данные.");
+    } finally {
+      setBackupBusy(false);
+    }
   }
 
   return (
@@ -46,13 +89,46 @@ export default function SettingsPage({
         </label>
       </section>
 
+      <section className="settings-card backup-card">
+        <div className="settings-card-heading">
+          <span className="settings-card-icon journal">↻</span>
+          <div><h2>Резервное копирование</h2><p>Копия включает базу, настройки, журнал и библиотеку документов.</p></div>
+        </div>
+        <div className="backup-warning" role="note">
+          Архив хранится без шифрования. Внутренняя копия создаётся в `%LOCALAPPDATA%\OfficeAI\backups`, затем приложение предлагает сохранить её через загрузку файла.
+        </div>
+        <div className="backup-actions">
+          <button className="primary-button" disabled={!runtimeConfig || backupBusy} onClick={handleCreateBackup} type="button">
+            {backupBusy ? "Выполняется…" : "Создать и скачать копию"}
+          </button>
+          <label className={`secondary-button restore-file-button ${!runtimeConfig || backupBusy ? "disabled" : ""}`}>
+            Выбрать копию для восстановления
+            <input
+              accept=".zip,application/zip"
+              disabled={!runtimeConfig || backupBusy}
+              onChange={(event) => {
+                const file = event.currentTarget.files?.[0];
+                event.currentTarget.value = "";
+                void handleRestore(file);
+              }}
+              type="file"
+            />
+          </label>
+        </div>
+        {backupMessage && (
+          <div className={`settings-feedback backup-feedback ${backupMessage.startsWith("Не удалось") ? "error" : ""}`} role="status">
+            {backupMessage}
+          </div>
+        )}
+      </section>
+
       <section className="settings-card">
         <div className="settings-card-heading">
           <span className="settings-card-icon shield">✓</span>
           <div><h2>Подтверждения</h2><p>Защитные настройки для будущих операций.</p></div>
         </div>
         <label className="setting-row toggle-row">
-          <span><strong>Подтверждать опасные действия</strong><small>Запрашивать подтверждение перед удалением и восстановлением.</small></span>
+          <span><strong>Подтверждать опасные действия</strong><small>Восстановление всегда требует отдельного подтверждения.</small></span>
           <input
             checked={settings.confirm_destructive_actions}
             disabled={savingKey === "confirm_destructive_actions"}
@@ -94,12 +170,20 @@ export default function SettingsPage({
   );
 }
 
+function formatBytes(size: number): string {
+  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} КиБ`;
+  return `${(size / (1024 * 1024)).toFixed(1)} МиБ`;
+}
+
 function operationTitle(event: OperationEvent): string {
   if (event.operationCode === "app_started") return "Приложение запущено";
   if (event.operationCode === "setting_updated") return "Настройка сохранена";
   if (event.operationCode === "document_uploaded") return "Документ добавлен";
   if (event.operationCode === "document_duplicate_detected") return "Обнаружен дубликат";
   if (event.operationCode === "document_upload_rejected") return "Загрузка отклонена";
+  if (event.operationCode === "backup_created") return event.outcome === "success" ? "Резервная копия создана" : "Резервная копия не создана";
+  if (event.operationCode === "backup_restored") return "Резервная копия восстановлена";
+  if (event.operationCode === "backup_restore_rejected") return "Восстановление отклонено";
   return "Операция";
 }
 
@@ -109,6 +193,9 @@ function operationDescription(event: OperationEvent): string {
   if (event.operationCode === "document_uploaded") return "Файл добавлен в локальную библиотеку";
   if (event.operationCode === "document_duplicate_detected") return "Байты совпадают с файлом в библиотеке";
   if (event.operationCode === "document_upload_rejected") return "Тип, содержимое или размер не прошли проверку";
+  if (event.operationCode === "backup_created") return event.outcome === "success" ? "Создан локальный архив библиотеки, настроек и журнала" : "Не удалось создать локальный архив";
+  if (event.operationCode === "backup_restored") return "Данные восстановлены из локальной резервной копии";
+  if (event.operationCode === "backup_restore_rejected") return "Архив не прошёл проверку целостности";
   return event.outcome === "success" ? "Выполнено успешно" : "Не выполнено";
 }
 

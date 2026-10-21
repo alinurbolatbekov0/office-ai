@@ -20,6 +20,9 @@ _ALLOWED_OPERATION_CODES = {
     "document_uploaded",
     "document_duplicate_detected",
     "document_upload_rejected",
+    "backup_created",
+    "backup_restored",
+    "backup_restore_rejected",
 }
 _ALLOWED_MESSAGE_CODES = {
     "app_started",
@@ -27,6 +30,9 @@ _ALLOWED_MESSAGE_CODES = {
     "document_uploaded",
     "document_duplicate_detected",
     "document_upload_rejected",
+    "backup_created",
+    "backup_restored",
+    "backup_restore_rejected",
 }
 
 

@@ -47,6 +47,13 @@ export interface DocumentFilters {
   sortOrder?: "asc" | "desc";
 }
 
+export interface BackupFile {
+  id: string;
+  filename: string;
+  sizeBytes: number;
+  createdAt: string;
+}
+
 export class DuplicateDocumentError extends Error {
   constructor(readonly existingDocuments: LibraryDocument[]) {
     super("Такой файл уже есть в библиотеке.");
@@ -138,6 +145,57 @@ export async function downloadDocument(config: RuntimeConfig, document: LibraryD
   const link = documentLink(objectUrl, filename);
   link.click();
   window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+}
+
+export async function createBackup(config: RuntimeConfig): Promise<BackupFile> {
+  const response = await fetch(`${config.apiBaseUrl}/backups`, {
+    method: "POST",
+    headers: {
+      "X-OfficeAI-Token": config.sessionToken,
+      "Content-Type": "application/json",
+    },
+    body: "{}",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? `Не удалось создать резервную копию (код ${response.status}).`);
+  }
+  const backup = (await response.json()) as BackupFile;
+  await downloadBackup(config, backup);
+  return backup;
+}
+
+async function downloadBackup(config: RuntimeConfig, backup: BackupFile): Promise<void> {
+  const response = await fetch(`${config.apiBaseUrl}/backups/${backup.id}/download`, {
+    headers: { "X-OfficeAI-Token": config.sessionToken },
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`Резервная копия создана локально, но скачать её не удалось (код ${response.status}).`);
+  const disposition = response.headers.get("content-disposition") ?? "";
+  const encodedFilename = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const filename = encodedFilename ? decodeURIComponent(encodedFilename) : backup.filename;
+  const objectUrl = URL.createObjectURL(await response.blob());
+  const link = documentLink(objectUrl, filename);
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+}
+
+export async function restoreBackup(config: RuntimeConfig, file: File): Promise<void> {
+  const response = await fetch(`${config.apiBaseUrl}/restore`, {
+    method: "POST",
+    headers: {
+      "X-OfficeAI-Token": config.sessionToken,
+      "Content-Type": "application/octet-stream",
+      "X-OfficeAI-Confirm-Restore": "true",
+    },
+    body: file,
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? `Не удалось восстановить данные (код ${response.status}).`);
+  }
 }
 
 function documentLink(url: string, filename: string): HTMLAnchorElement {

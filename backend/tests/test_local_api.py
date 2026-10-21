@@ -8,10 +8,12 @@ import unittest
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit
 from unittest.mock import patch
+from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 import io
 
 from office_ai.api.app import create_app
+from office_ai.application.backups import BackupService, InvalidBackup
 from office_ai.domain.documents import InvalidDocument
 from office_ai.infrastructure.database import LocalDatabase
 from office_ai.infrastructure.storage_paths import get_user_data_directory
@@ -332,6 +334,59 @@ class LocalApiSecurityTests(unittest.TestCase):
         self.assertEqual(status, 201)
         self.assertEqual(json.loads(body)["document"]["type"], "DOCX")
 
+    def test_backup_round_trip_restores_database_and_original_documents(self) -> None:
+        original = b"%PDF-1.7\nsynthetic backup fixture\n%%EOF"
+        status, body, _ = self.upload("Архив Құжат.pdf", original)
+        self.assertEqual(status, 201)
+        service: BackupService = self.app.state.backup_service
+        backup = service.create_backup()
+        archive_path = self.data_directory / "backups" / f"{backup['id']}.zip"
+        self.assertTrue(archive_path.is_file())
+
+        self.app.state.database.update_setting("theme", "dark")
+        stored_file = next((self.data_directory / "documents").glob("*.bin"))
+        stored_file.write_bytes(b"changed local contents")
+
+        async def chunks():
+            yield archive_path.read_bytes()
+
+        uploaded_archive = asyncio.run(service.receive_restore_upload(chunks()))
+        service.restore_archive(uploaded_archive)
+        self.assertEqual(self.app.state.database.get_settings()["theme"], "light")
+        restored = next((self.data_directory / "documents").glob("*.bin"))
+        self.assertEqual(restored.read_bytes(), original)
+        self.assertEqual(self.app.state.document_library.query()[1], 1)
+        with sqlite3.connect(self.data_directory / "officeai.sqlite3") as connection:
+            operation_codes = {row[0] for row in connection.execute("SELECT operation_code FROM operation_log")}
+        self.assertIn("backup_restored", operation_codes)
+
+    def test_invalid_backup_is_rejected_without_changing_live_database(self) -> None:
+        service: BackupService = self.app.state.backup_service
+        original_setting = self.app.state.database.get_settings()["theme"]
+        (self.data_directory / "backups").mkdir(exist_ok=True)
+        malicious_archive = self.data_directory / "backups" / f".restore-upload-{uuid4().hex}.zip"
+        manifest = {
+            "format": "office-ai-backup",
+            "schemaVersion": 2,
+            "files": [{"path": "../escape", "sizeBytes": 0, "sha256": "0" * 64}],
+        }
+        with ZipFile(malicious_archive, "w") as archive:
+            archive.writestr("manifest.json", json.dumps(manifest))
+            archive.writestr("../escape", b"")
+        with self.assertRaises(InvalidBackup):
+            service.restore_archive(malicious_archive)
+        self.assertFalse((self.data_directory.parent / "escape").exists())
+        self.assertEqual(self.app.state.database.get_settings()["theme"], original_setting)
+
+    def test_backup_api_creates_a_generated_local_archive(self) -> None:
+        headers = {**self.headers, "content-type": "application/json"}
+        status, body, _ = self.request("/api/v1/backups", headers, method="POST", body=b"{}")
+        self.assertEqual(status, 201)
+        backup = json.loads(body)
+        self.assertRegex(backup["id"], r"^[0-9a-f]{32}$")
+        self.assertTrue((self.data_directory / "backups" / f"{backup['id']}.zip").is_file())
+        _, journal, _ = self.request("/api/v1/operations", self.headers)
+        self.assertIn("backup_created", journal.decode())
 
 if __name__ == "__main__":
     unittest.main()
