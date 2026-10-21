@@ -101,7 +101,7 @@ function App() {
   const allNavigation = [...baseNavigation, ...agents.map((agent) => ({ id: agent.id, label: agent.title, icon: "✦" }))];
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-backend-ready={health ? "true" : startupLoading ? "loading" : "false"}>
       <aside className="sidebar">
         <div className="brand-lockup">
           <div className="brand-mark">O</div>
