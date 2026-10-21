@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 
 import { definitions } from "./registry";
 import {
@@ -32,10 +32,15 @@ export default function AgentWorkspace({
   const [documents, setDocuments] = useState<LibraryDocument[]>([]);
   const [taskCode, setTaskCode] = useState("");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [documentQuery, setDocumentQuery] = useState("");
+  const [searchInput, setSearchInput] = useState("");
+  const [documentOffset, setDocumentOffset] = useState(0);
+  const [documentTotal, setDocumentTotal] = useState(0);
   const [instruction, setInstruction] = useState("");
   const [preview, setPreview] = useState<AgentTaskPreview | null>(null);
   const [history, setHistory] = useState<AgentTaskHistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingDocuments, setLoadingDocuments] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,7 +49,6 @@ export default function AgentWorkspace({
     setLoading(true);
     setError(null);
     setTasks([]);
-    setDocuments([]);
     setTaskCode("");
     setSelectedIds([]);
     setInstruction("");
@@ -53,12 +57,11 @@ export default function AgentWorkspace({
       setLoading(false);
       return;
     }
-    Promise.all([getAgentTasks(runtimeConfig, agent.id), getDocuments(runtimeConfig), getAgentTaskHistory(runtimeConfig)])
-      .then(([nextTasks, response, taskHistory]) => {
+    Promise.all([getAgentTasks(runtimeConfig, agent.id), getAgentTaskHistory(runtimeConfig)])
+      .then(([nextTasks, taskHistory]) => {
         if (!active) return;
         setTasks(nextTasks);
         setTaskCode(nextTasks[0]?.code || "");
-        setDocuments(response.documents);
         setHistory(taskHistory);
       })
       .catch((reason: unknown) => {
@@ -71,6 +74,23 @@ export default function AgentWorkspace({
       active = false;
     };
   }, [agent.id, runtimeConfig]);
+
+  useEffect(() => {
+    let active = true;
+    if (!runtimeConfig) return;
+    setLoadingDocuments(true);
+    getDocuments(runtimeConfig, { search: documentQuery, limit: 200, offset: documentOffset })
+      .then((response) => {
+        if (!active) return;
+        setDocuments((current) => documentOffset === 0 ? response.documents : [...current, ...response.documents]);
+        setDocumentTotal(response.total);
+      })
+      .catch((reason: unknown) => {
+        if (active) setError(reason instanceof Error ? reason.message : "Не удалось загрузить список документов.");
+      })
+      .finally(() => { if (active) setLoadingDocuments(false); });
+    return () => { active = false; };
+  }, [documentQuery, documentOffset, runtimeConfig]);
 
   const task = tasks.find((entry) => entry.code === taskCode);
   const selectableDocuments = useMemo(() => {
@@ -92,6 +112,15 @@ export default function AgentWorkspace({
   function toggleDocument(id: string) {
     setSelectedIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
     setPreview(null);
+  }
+
+  function submitDocumentSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const nextQuery = searchInput.trim();
+    if (nextQuery === documentQuery && documentOffset === 0) return;
+    setDocuments([]);
+    setDocumentOffset(0);
+    setDocumentQuery(nextQuery);
   }
 
   async function handlePreview() {
@@ -135,8 +164,13 @@ export default function AgentWorkspace({
 
               <div className="agent-document-picker">
                 <div className="agent-picker-heading"><strong>Документы</strong><span>{selectedIds.length} из 5 выбрано</span></div>
+                <form className="agent-document-search" onSubmit={submitDocumentSearch}>
+                  <input aria-label="Поиск документов библиотеки" value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="Найти по имени…" />
+                  <button type="submit">Найти</button>
+                </form>
+                {loadingDocuments && <p className="agent-inline-message">Загружаю документы…</p>}
                 {selectableDocuments.length === 0 ? (
-                  <p className="agent-inline-message">Подходящих DOCX, XLSX или PPTX файлов в библиотеке пока нет.</p>
+                  <p className="agent-inline-message">Подходящих для этой задачи документов по текущему поиску не найдено.</p>
                 ) : selectableDocuments.map((document) => (
                   <label className="agent-document-option" key={document.id}>
                     <input
@@ -148,6 +182,11 @@ export default function AgentWorkspace({
                     <span className="agent-document-name"><strong>{document.name}</strong><small>{document.type} · {formatBytes(document.sizeBytes)}</small></span>
                   </label>
                 ))}
+                {documents.length < documentTotal && (
+                  <button className="agent-load-more" type="button" disabled={loadingDocuments} onClick={() => setDocumentOffset((current) => current + 200)}>
+                    Показать ещё документы
+                  </button>
+                )}
               </div>
 
               <label className="agent-field-label" htmlFor="agent-instruction">Дополнительная инструкция</label>
