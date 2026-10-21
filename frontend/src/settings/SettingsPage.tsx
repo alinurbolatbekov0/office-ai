@@ -184,6 +184,7 @@ function operationTitle(event: OperationEvent): string {
   if (event.operationCode === "backup_created") return event.outcome === "success" ? "Резервная копия создана" : "Резервная копия не создана";
   if (event.operationCode === "backup_restored") return "Резервная копия восстановлена";
   if (event.operationCode === "backup_restore_rejected") return "Восстановление отклонено";
+  if (event.operationCode === "agent_preview_created") return "Подготовлены данные агента";
   return "Операция";
 }
 
@@ -196,6 +197,7 @@ function operationDescription(event: OperationEvent): string {
   if (event.operationCode === "backup_created") return event.outcome === "success" ? "Создан локальный архив библиотеки, настроек и журнала" : "Не удалось создать локальный архив";
   if (event.operationCode === "backup_restored") return "Данные восстановлены из локальной резервной копии";
   if (event.operationCode === "backup_restore_rejected") return "Архив не прошёл проверку целостности";
+  if (event.operationCode === "agent_preview_created") return "Локальный предпросмотр; данные не отправлялись";
   return event.outcome === "success" ? "Выполнено успешно" : "Не выполнено";
 }
 
