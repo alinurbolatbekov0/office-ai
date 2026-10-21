@@ -228,7 +228,7 @@ export default function AgentWorkspace({
         {history.length === 0 ? <p className="agent-inline-message">История появится после первого локального предпросмотра.</p> : (
           <ul className="agent-history-list">
             {history.map((entry) => <li key={entry.id}>
-              <span><strong>{agentNames[entry.agentId] ?? entry.agentId}</strong><small>{entry.taskCode} · {entry.sourceCount} {pluralDocuments(entry.sourceCount)}</small></span>
+              <span><strong>{agentNames[entry.agentId] ?? entry.agentId}</strong><small>{taskNames[entry.taskCode] ?? entry.taskCode} · {entry.sourceCount} {pluralDocuments(entry.sourceCount)}</small></span>
               <time dateTime={entry.createdAt}>{formatDate(entry.createdAt)}</time>
             </li>)}
           </ul>
@@ -248,6 +248,21 @@ const agentNames: Record<string, string> = {
   "business-correspondence": "Деловая переписка",
   "excel-analytics": "Excel-аналитика",
   "powerpoint-presentations": "Презентации PowerPoint",
+};
+
+const taskNames: Record<string, string> = {
+  "prepare-from-template": "Подготовка документа по шаблону",
+  "consolidate-files": "Собрать сведения из файлов",
+  "check-completeness": "Проверка комплектности",
+  "draft-letter": "Составить черновик письма",
+  "draft-reply": "Подготовить ответ",
+  "draft-cover-note": "Сформировать сопроводительный текст",
+  "summarize-workbook": "Сделать сводку по таблице",
+  "compare-periods": "Сравнить показатели и периоды",
+  "report-findings": "Подготовить выводы для отчёта",
+  "outline-slides": "Составить план слайдов",
+  "draft-speaker-notes": "Подготовить заметки докладчика",
+  "draft-presentation": "Собрать презентацию",
 };
 
 function pluralDocuments(count: number): string {
