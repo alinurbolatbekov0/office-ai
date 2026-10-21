@@ -9,7 +9,6 @@ from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
 from pypdf import PdfReader
-from pypdf.errors import PdfReadError
 
 from office_ai.application.document_library import DocumentLibrary
 from office_ai.domain.agents.task_catalog import get_agent_task
@@ -133,7 +132,7 @@ def _extract_pdf(path: Path) -> str:
         return "\n\n".join(pages)
     except InvalidDocumentPreview:
         raise
-    except (PdfReadError, ValueError, OSError, RecursionError, RuntimeError, KeyError) as error:
+    except Exception as error:
         raise InvalidDocumentPreview("Не удалось безопасно извлечь текст из PDF.") from error
 
 
