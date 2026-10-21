@@ -10,7 +10,7 @@ Windows-сборка выполняется в GitHub Actions на Windows runne
 2. CI устанавливает зависимости backend с закреплёнными версиями верхнего уровня и PyInstaller 6.13.0. Frontend использует `npm ci` по `package-lock.json`.
 3. Frontend собирается в статические файлы, которые включаются в приложение.
 4. PyInstaller собирает Python-приложение, FastAPI, pywebview, Windows engine dependencies и статические ресурсы в Windows-пакет. Для надёжного обнаружения ресурсов используется режим `onedir`; все runtime-файлы лежат рядом с exe.
-5. Inno Setup 6.4.3 формирует per-user установщик `.exe` в `%LOCALAPPDATA%\Programs\Office AI`; права администратора не нужны.
+5. Inno Setup 6.4.3 формирует per-user установщик `.exe` в `%LOCALAPPDATA%\Programs\Office AI`; CI разрешает downgrade версии, если образ runner уже содержит более новый компилятор. Права администратора не нужны.
 6. Windows workflow выполняет тихую установку и удаление на свежем runner, проверяет файлы приложения, запуск entrypoint с `--help` и сохранность маркера пользовательских данных после удаления.
 7. CI сохраняет установщик как временный workflow artifact на 14 дней. Публикация релиза не автоматизируется.
 
