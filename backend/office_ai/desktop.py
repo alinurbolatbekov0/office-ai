@@ -122,7 +122,18 @@ def _start_backend(
         frontend_dist=FRONTEND_DIST,
         data_directory=data_directory,
     )
-    server = uvicorn.Server(uvicorn.Config(app, host=DEV_HOST, port=port, log_level="warning"))
+    # Uvicorn's default dictConfig resolves formatters dynamically, which PyInstaller
+    # can omit from frozen builds. The application does not rely on Uvicorn logs.
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host=DEV_HOST,
+            port=port,
+            log_level="warning",
+            log_config=None,
+            access_log=False,
+        )
+    )
     thread = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
     thread.start()
     deadline = time.monotonic() + 10
