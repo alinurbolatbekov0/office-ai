@@ -1,0 +1,113 @@
+name: Windows package
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke-test:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.1
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.12.10
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install backend and packaging dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -r backend/requirements.txt pyinstaller==6.13.0
+
+      - name: Run backend checks
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "backend"
+          python -m unittest discover -s backend/tests -v
+          python -m compileall -q backend/office_ai backend/tests
+
+      - name: Build PyInstaller onedir package
+        shell: pwsh
+        run: |
+          $arguments = @(
+            "--clean",
+            "--noconfirm",
+            "--onedir",
+            "--windowed",
+            "--name", "OfficeAI",
+            "--paths", "backend",
+            "--add-data", "frontend/dist;frontend/dist",
+            "--collect-all", "webview",
+            "--collect-all", "pythonnet",
+            "--collect-all", "clr_loader",
+            "--hidden-import", "uvicorn.logging",
+            "--hidden-import", "uvicorn.loops.auto",
+            "--hidden-import", "uvicorn.protocols.http.auto",
+            "--hidden-import", "uvicorn.lifespan.on",
+            "--distpath", "build/dist",
+            "--workpath", "build/work",
+            "backend/office_ai/desktop.py"
+          )
+          python -m PyInstaller @arguments
+          if (-not (Test-Path "build/dist/OfficeAI/OfficeAI.exe")) { throw "PyInstaller did not produce OfficeAI.exe" }
+          if (-not (Test-Path "build/dist/OfficeAI/_internal/frontend/dist/index.html")) { throw "Bundled frontend was not found" }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --version=6.4.3 --yes --no-progress
+
+      - name: Create installer
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6/ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler was not found at $iscc" }
+          $version = python -c "import tomllib; print(tomllib.load(open('backend/pyproject.toml', 'rb'))['project']['version'])"
+          $env:OFFICEAI_PACKAGE_DIR = (Resolve-Path "build/dist/OfficeAI").Path
+          $output = Join-Path $env:RUNNER_TEMP "office-ai-installer"
+          New-Item -ItemType Directory -Force -Path $output | Out-Null
+          & $iscc "/DAppVersion=$version" "/O$output" "packaging/OfficeAI.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+          $installer = Join-Path $output "OfficeAI-Setup-$version.exe"
+          if (-not (Test-Path $installer)) { throw "Installer executable was not produced" }
+
+      - name: Install, verify contents and uninstall
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem (Join-Path $env:RUNNER_TEMP "office-ai-installer") -Filter "OfficeAI-Setup-*.exe" | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $installer) { throw "Installer artifact is missing" }
+          ./packaging/smoke-installed-package.ps1 -InstallerPath $installer -InstallDirectory (Join-Path $env:RUNNER_TEMP "OfficeAI-install-test")
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: office-ai-windows-installer
+          path: ${{ runner.temp }}/office-ai-installer/OfficeAI-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 14
