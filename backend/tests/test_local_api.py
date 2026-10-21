@@ -596,6 +596,12 @@ class LocalApiSecurityTests(unittest.TestCase):
             self.app.state.database.get_agent_task_result(history["id"])["resultText"],
             "Synthetic AI draft",
         )
+        export_status, exported_body, export_headers = self.request(
+            f"/api/v1/agents/history/{history['id']}/export", self.headers
+        )
+        self.assertEqual(export_status, 200)
+        self.assertIn("application/vnd.openxmlformats-officedocument.wordprocessingml.document", export_headers["content-type"])
+        self.assertTrue(exported_body.startswith(b"PK"))
         with closing(sqlite3.connect(self.data_directory / "officeai.sqlite3")) as connection, connection:
             saved_request = connection.execute(
                 "SELECT result_text FROM agent_task_results"
