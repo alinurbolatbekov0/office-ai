@@ -80,6 +80,8 @@ export interface DocumentFilters {
   importedTo?: string;
   sortBy?: "name" | "imported_at" | "size_bytes" | "type";
   sortOrder?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
 }
 
 export interface BackupFile {
@@ -121,7 +123,7 @@ export async function getDocuments(
   config: RuntimeConfig,
   filters: DocumentFilters = {},
 ): Promise<{ documents: LibraryDocument[]; total: number }> {
-  const query = new URLSearchParams({ limit: "50", offset: "0" });
+  const query = new URLSearchParams({ limit: String(filters.limit ?? 50), offset: String(filters.offset ?? 0) });
   if (filters.search) query.set("search", filters.search);
   if (filters.type) query.set("type", filters.type);
   if (filters.importedFrom) query.set("imported_from", filters.importedFrom);
