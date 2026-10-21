@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
+import re
 
 from docx import Document
 from openpyxl import Workbook
@@ -124,7 +125,7 @@ def _render_xlsx(text: str) -> bytes:
 def _render_pptx(text: str) -> bytes:
     if len(text) > MAX_PRESENTATION_TEXT_CHARACTERS:
         raise ResultExportError("Текст слишком велик для безопасного экспорта презентации.")
-    chunks = _split_text(text, 1_800)
+    chunks = _presentation_sections(text)
     if len(chunks) > MAX_PRESENTATION_SLIDES:
         raise ResultExportError("Результат требует слишком много слайдов; сократите его и повторите задачу.")
     presentation = Presentation()
@@ -134,13 +135,13 @@ def _render_pptx(text: str) -> bytes:
         slide = presentation.slides.add_slide(presentation.slide_layouts[1])
         title = slide.shapes.title
         body = slide.placeholders[1].text_frame
-        paragraphs = chunk.splitlines() or [chunk]
-        heading = paragraphs[0].strip().lstrip("# ")[:120] or f"Основное содержание {index}"
+        heading, body_lines = chunk
+        heading = heading[:120] or f"Основное содержание {index}"
         title.text = heading
         title.text_frame.paragraphs[0].font.color.rgb = RGBColor(67, 59, 157)
         title.text_frame.paragraphs[0].font.size = Pt(28)
         body.clear()
-        for paragraph_text in paragraphs[1:] if len(paragraphs) > 1 else paragraphs:
+        for paragraph_text in body_lines:
             if not paragraph_text.strip():
                 continue
             paragraph = body.add_paragraph()
@@ -151,6 +152,48 @@ def _render_pptx(text: str) -> bytes:
     buffer = BytesIO()
     presentation.save(buffer)
     return buffer.getvalue()
+
+
+_SLIDE_HEADING = re.compile(r"^(?:#+\s*)?Слайд\s*\d+\s*(?:[-–—:.]\s*|\s+)(.+)$", re.IGNORECASE)
+_MARKDOWN_HEADING = re.compile(r"^#{1,3}\s+(.+)$")
+
+
+def _presentation_sections(text: str) -> list[tuple[str, list[str]]]:
+    sections: list[tuple[str, list[str]]] = []
+    current_title: str | None = None
+    current_lines: list[str] = []
+    saw_explicit_heading = False
+    for line in text.splitlines():
+        slide_match = _SLIDE_HEADING.match(line.strip())
+        markdown_match = _MARKDOWN_HEADING.match(line.strip())
+        title_match = slide_match or markdown_match
+        if title_match:
+            if current_title is not None:
+                sections.append((current_title, current_lines))
+            current_title = title_match.group(1).strip()
+            current_lines = []
+            saw_explicit_heading = True
+        elif current_title is not None:
+            if line.strip():
+                current_lines.append(line.strip().lstrip("-•* "))
+        elif line.strip():
+            current_lines.append(line.strip())
+    if current_title is not None:
+        sections.append((current_title, current_lines))
+    if saw_explicit_heading:
+        return sections
+
+    paragraphs = [line.strip().lstrip("-•* ") for line in text.splitlines() if line.strip()]
+    if not paragraphs:
+        paragraphs = [text.strip()]
+    sections = []
+    for index, chunk in enumerate(_split_text("\n".join(paragraphs), 1_200), start=1):
+        lines = chunk.splitlines() or [chunk]
+        if len(lines) == 1:
+            sections.append((lines[0][:120], [lines[0]]))
+        else:
+            sections.append((lines[0][:120], lines[1:]))
+    return sections
 
 
 def _split_text(text: str, limit: int) -> list[str]:
