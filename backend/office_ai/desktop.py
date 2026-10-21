@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -11,7 +12,6 @@ import threading
 import time
 import urllib.error
 import urllib.request
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -21,7 +21,11 @@ import uvicorn
 from office_ai.api.app import create_app
 from office_ai.application.backups import BackupService
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+if getattr(sys, "frozen", False):
+    # PyInstaller stores bundled resources below _MEIPASS in onedir builds.
+    ROOT_DIR = Path(getattr(sys, "_MEIPASS"))
+else:
+    ROOT_DIR = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = ROOT_DIR / "frontend"
 FRONTEND_DIST = FRONTEND_DIR / "dist"
 DEV_HOST = "127.0.0.1"
