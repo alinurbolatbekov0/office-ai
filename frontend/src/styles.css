@@ -82,8 +82,10 @@ button { font: inherit; }
 .agent-card-copy strong { color: #313644; font-size: 11px; font-weight: 700; }
 .agent-card-copy > span { color: #9299a6; font-size: 9px; line-height: 1.5; }
 .card-arrow { color: #b7bdc8; font-size: 13px; position: absolute; right: 15px; top: 15px; }
-.prepared-label { background: #f6f6fb; border-radius: 4px; bottom: 15px; color: #928dd2; font-size: 8px; padding: 4px 6px; position: absolute; right: 14px; }
+.prepared-label { background: #f0efff; border-radius: 4px; bottom: 15px; color: #5c54c8; font-size: 9px; font-weight: 600; padding: 4px 6px; position: absolute; right: 14px; }
 .loading-card { background: #fff; border: 1px solid #ebedf1; border-radius: 10px; color: #9299a6; font-size: 11px; grid-column: 1 / -1; padding: 26px; text-align: center; }
+.inline-retry-button { background: transparent; border: 0; color: #655ce0; cursor: pointer; font: inherit; font-weight: 700; padding: 0 2px; text-decoration: underline; }
+.inline-retry-button:hover { color: #4941b7; }
 
 .workspace-status { align-items: center; background: #fff; border: 1px solid #ebedf1; border-radius: 10px; display: flex; gap: 13px; margin-top: 23px; padding: 13px 16px; }
 .status-icon { align-items: center; background: #f1f0ff; border-radius: 8px; color: #6c64da; display: flex; font-size: 16px; height: 34px; justify-content: center; width: 34px; }

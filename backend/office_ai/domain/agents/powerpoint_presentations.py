@@ -5,5 +5,5 @@ from office_ai.domain.agents.models import AgentDescriptor
 AGENT = AgentDescriptor(
     id="powerpoint-presentations",
     title="Презентации PowerPoint",
-    description="Подготовка структуры и материалов презентации.",
+    description="Планы слайдов, заметки докладчика и черновики презентаций по выбранным материалам.",
 )
