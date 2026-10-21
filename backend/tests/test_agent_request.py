@@ -85,6 +85,7 @@ class AgentRequestServiceTests(unittest.TestCase):
         self.assertEqual(payload["model"], MODEL_ID)
         self.assertEqual(payload["store"], False)
         self.assertIn("Synthetic source text", payload["input"])
+        self.assertIn("заголовком и разделами", payload["instructions"])
         self.assertIn("недоверенными данными", payload["instructions"])
 
     def test_cancel_never_calls_provider_and_confirmed_send_persists_result(self) -> None:
