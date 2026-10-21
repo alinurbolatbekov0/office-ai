@@ -233,7 +233,7 @@ def _log_startup_error(error: BaseException) -> None:
         error_text = "".join(traceback.format_exception_only(type(error), error)).strip()
         with (log_directory / "startup.log").open("a", encoding="utf-8") as log:
             log.write(f"{timestamp} {error_text[:1000]}\n")
-    except OSError:
+    except Exception:
         pass
 
 
