@@ -97,6 +97,7 @@ class BackupService:
                 "sizeBytes": db_size,
                 "sha256": db_digest,
             }]
+            total_size = db_size
             content_files: list[tuple[str, Path, str, int]] = [(entries[0]["path"], snapshot_path, db_digest, db_size)]
             documents_root = self.documents_root.resolve(strict=True) if self.documents_root.exists() else self.documents_root
             for row in rows:
@@ -117,6 +118,9 @@ class BackupService:
                 digest, size = _sha256(resolved)
                 if digest != row["sha256"] or size != row["size_bytes"]:
                     raise InvalidBackup("Файл библиотеки не совпадает с метаданными базы.")
+                total_size += size
+                if total_size > MAX_BACKUP_SIZE_BYTES:
+                    raise InvalidBackup("Суммарный размер данных превышает ограничение 2 ГиБ.")
                 entries.append({"path": archive_name, "sizeBytes": size, "sha256": digest})
                 content_files.append((archive_name, resolved, digest, size))
                 if len(entries) > MAX_ARCHIVE_MEMBERS - 1:
