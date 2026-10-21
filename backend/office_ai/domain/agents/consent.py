@@ -39,7 +39,11 @@ class TransferItem:
             object.__setattr__(self, "categories", tuple(self.categories))
         if not self.resource_id or len(self.resource_id) > 128 or any(c in self.resource_id for c in "/\\:"):
             raise InvalidTransferDisclosure("Для передачи указан некорректный внутренний ID данных.")
-        if not self.display_name or len(self.display_name) > 255 or any(c in self.display_name for c in "\r\n"):
+        if (
+            not self.display_name
+            or len(self.display_name) > 255
+            or any(c in self.display_name for c in "\r\n/\\:")
+        ):
             raise InvalidTransferDisclosure("Не удалось безопасно показать имя выбранных данных.")
         if (
             not self.categories
