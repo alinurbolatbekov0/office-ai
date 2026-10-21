@@ -18,8 +18,9 @@ import io
 
 from fastapi import FastAPI
 
-from office_ai.api.app import create_app
+from office_ai.api.app import AgentPreviewRequest, create_app
 from office_ai.application.backups import BackupService, InvalidBackup
+from office_ai.application.document_preview import InvalidDocumentPreview
 from office_ai.domain.documents import InvalidDocument
 from office_ai.desktop import DesktopBridge, RuntimeConfig, _start_backend
 from office_ai.infrastructure.database import LocalDatabase
@@ -282,6 +283,30 @@ class LocalApiSecurityTests(unittest.TestCase):
             headers["x-officeai-confirm-duplicate"] = "true"
         return self.request("/api/v1/documents", headers, method="POST", body=contents)
 
+    @staticmethod
+    def office_fixture(extension: str, parts: dict[str, str]) -> bytes:
+        required_parts = {
+            "docx": "word/document.xml",
+            "xlsx": "xl/workbook.xml",
+            "pptx": "ppt/presentation.xml",
+        }
+        buffer = io.BytesIO()
+        with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
+            archive.writestr("[Content_Types].xml", "<Types/>")
+            if required_parts[extension] not in parts:
+                archive.writestr(required_parts[extension], "<root/>")
+            for name, content in parts.items():
+                archive.writestr(name, content)
+        return buffer.getvalue()
+
+    def preview(self, agent: str, task: str, document_ids: list[str], instruction: str = "") -> dict[str, object]:
+        return self.app.state.document_preview.create(
+            agent_id=agent,
+            task_code=task,
+            document_ids=document_ids,
+            instruction=instruction,
+        )
+
     def test_upload_detects_duplicates_and_requires_explicit_confirmation(self) -> None:
         original = b"%PDF-1.7\nsynthetic anonymized test fixture\n%%EOF"
         status, body, _ = self.upload("Тестовый отчёт.pdf", original)
@@ -407,6 +432,129 @@ class LocalApiSecurityTests(unittest.TestCase):
         status, body, _ = self.upload("Контракт.docx", buffer.getvalue())
         self.assertEqual(status, 201)
         self.assertEqual(json.loads(body)["document"]["type"], "DOCX")
+
+    def test_docx_agent_preview_is_local_read_only_and_not_journaled(self) -> None:
+        source_text = "Құжаттың синтетикалық мәтіні / Текст синтетического документа"
+        original = self.office_fixture(
+            "docx",
+            {
+                "word/document.xml": (
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                    f"<w:body><w:p><w:r><w:t>{source_text}</w:t></w:r></w:p></w:body></w:document>"
+                )
+            },
+        )
+        status, uploaded, _ = self.upload("Synthetic.docx", original)
+        self.assertEqual(status, 201)
+        document = json.loads(uploaded)["document"]
+        stored_path, _ = self.app.state.document_library.get_download(document["id"])
+        before = stored_path.read_bytes()
+
+        result = self.preview(
+            "document-management",
+            "consolidate-files",
+            [document["id"]],
+            "Кратко перечисли ключевые сведения",
+        )
+
+        self.assertIn(source_text, result["payloadPreview"])
+        self.assertIn("Кратко перечисли ключевые сведения", result["payloadPreview"])
+        self.assertEqual(stored_path.read_bytes(), before)
+        self.assertEqual(list((self.data_directory / "documents").glob("*.bin")), [stored_path])
+        _, journal_body, _ = self.request("/api/v1/operations", self.headers)
+        self.assertNotIn(source_text, journal_body.decode())
+
+    def test_agent_preview_api_handler_returns_the_service_preview(self) -> None:
+        source_text = "Синтетический фрагмент для теста API"
+        original = self.office_fixture(
+            "docx",
+            {
+                "word/document.xml": (
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                    f"<w:body><w:p><w:r><w:t>{source_text}</w:t></w:r></w:p></w:body></w:document>"
+                )
+            },
+        )
+        status, uploaded, _ = self.upload("Synthetic API.docx", original)
+        self.assertEqual(status, 201)
+        document_id = json.loads(uploaded)["document"]["id"]
+        route_path = "/api/v1/agents/{agent_id}/tasks/{task_code}/preview"
+        route = next(route for route in self.app.routes if getattr(route, "path", None) == route_path)
+        payload = AgentPreviewRequest(document_ids=[document_id], instruction="Только локальная подготовка")
+
+        response = route.endpoint("document-management", "consolidate-files", payload)
+
+        self.assertEqual(response.status_code, 200)
+        preview = json.loads(response.body)
+        self.assertIn(source_text, preview["payloadPreview"])
+        self.assertEqual(preview["sources"][0]["id"], document_id)
+
+    def test_xlsx_preview_includes_saved_values_but_skips_formulas_and_cached_results(self) -> None:
+        original = self.office_fixture(
+            "xlsx",
+            {
+                "xl/sharedStrings.xml": (
+                    '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                    "<si><t>Синтетический доход</t></si></sst>"
+                ),
+                "xl/worksheets/sheet1.xml": (
+                    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                    "<sheetData><row r=\"1\"><c r=\"A1\" t=\"s\"><v>0</v></c>"
+                    "<c r=\"A2\"><f>SUM(A1:A1)</f><v>987654</v></c></row></sheetData></worksheet>"
+                ),
+            },
+        )
+        status, uploaded, _ = self.upload("Synthetic.xlsx", original)
+        self.assertEqual(status, 201)
+        document_id = json.loads(uploaded)["document"]["id"]
+
+        result = self.preview("excel-analytics", "summarize-workbook", [document_id])
+
+        preview_text = result["payloadPreview"]
+        self.assertIn("Синтетический доход", preview_text)
+        self.assertNotIn("SUM(", preview_text)
+        self.assertNotIn("987654", preview_text)
+
+    def test_pptx_preview_orders_slides_by_number(self) -> None:
+        drawing = "http://schemas.openxmlformats.org/drawingml/2006/main"
+        original = self.office_fixture(
+            "pptx",
+            {
+                "ppt/slides/slide2.xml": f'<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="{drawing}"><a:t>Слайд второй</a:t></p:sld>',
+                "ppt/slides/slide1.xml": f'<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="{drawing}"><a:t>Слайд первый</a:t></p:sld>',
+            },
+        )
+        status, uploaded, _ = self.upload("Synthetic.pptx", original)
+        self.assertEqual(status, 201)
+        document_id = json.loads(uploaded)["document"]["id"]
+
+        result = self.preview("powerpoint-presentations", "draft-speaker-notes", [document_id])
+
+        preview_text = result["payloadPreview"]
+        self.assertLess(preview_text.index("Слайд первый"), preview_text.index("Слайд второй"))
+
+    def test_preview_rejects_xml_entities_unsupported_pdf_and_wrong_task_category(self) -> None:
+        unsafe_xml = (
+            '<!DOCTYPE w:document [<!ENTITY local SYSTEM "file:///not-read">]>'
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            "<w:body><w:p><w:r><w:t>&local;</w:t></w:r></w:p></w:body></w:document>"
+        )
+        status, uploaded, _ = self.upload(
+            "Unsafe.docx",
+            self.office_fixture("docx", {"word/document.xml": unsafe_xml}),
+        )
+        self.assertEqual(status, 201)
+        unsafe_id = json.loads(uploaded)["document"]["id"]
+        with self.assertRaises(InvalidDocumentPreview):
+            self.preview("document-management", "consolidate-files", [unsafe_id])
+
+        status, uploaded, _ = self.upload("Synthetic.pdf", b"%PDF-1.7\nsynthetic fixture\n%%EOF")
+        self.assertEqual(status, 201)
+        pdf_id = json.loads(uploaded)["document"]["id"]
+        with self.assertRaises(InvalidDocumentPreview):
+            self.preview("document-management", "consolidate-files", [pdf_id])
+        with self.assertRaises(InvalidDocumentPreview):
+            self.preview("excel-analytics", "summarize-workbook", [unsafe_id])
 
     def test_backup_round_trip_restores_database_and_original_documents(self) -> None:
         original = b"%PDF-1.7\nsynthetic backup fixture\n%%EOF"
