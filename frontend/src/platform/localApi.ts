@@ -327,6 +327,21 @@ export async function getAgentTaskResult(config: RuntimeConfig, historyId: strin
   return request(config, `agents/history/${encodeURIComponent(historyId)}/result`);
 }
 
+export async function downloadAgentTaskResult(config: RuntimeConfig, historyId: string): Promise<void> {
+  const response = await fetch(`${config.apiBaseUrl}/agents/history/${encodeURIComponent(historyId)}/export`, {
+    headers: { "X-OfficeAI-Token": config.sessionToken },
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? `Не удалось подготовить файл результата (код ${response.status}).`);
+  }
+  const filename = response.headers.get("content-disposition")?.match(/filename="([a-zA-Z0-9._-]+)"/)?.[1] ?? "office-ai-result";
+  const objectUrl = URL.createObjectURL(await response.blob());
+  documentLink(objectUrl, filename).click();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+}
+
 async function postJson<T>(config: RuntimeConfig, resource: string, body: object): Promise<T> {
   const response = await fetch(`${config.apiBaseUrl}/${resource}`, {
     method: "POST",
