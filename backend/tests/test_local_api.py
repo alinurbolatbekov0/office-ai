@@ -6,6 +6,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+from contextlib import closing
 from types import SimpleNamespace
 import unittest
 from pathlib import Path
@@ -174,7 +175,7 @@ class LocalApiSecurityTests(unittest.TestCase):
         database_path = self.data_directory / "officeai.sqlite3"
         self.assertTrue(database_path.is_file())
         self.assertEqual(database_path.parent, self.data_directory)
-        with sqlite3.connect(database_path) as connection:
+        with closing(sqlite3.connect(database_path)) as connection, connection:
             self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
             self.assertEqual(
                 connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
@@ -189,7 +190,7 @@ class LocalApiSecurityTests(unittest.TestCase):
         legacy_path = self.data_directory / "legacy"
         legacy_path.mkdir()
         database_path = legacy_path / "officeai.sqlite3"
-        with sqlite3.connect(database_path) as connection:
+        with closing(sqlite3.connect(database_path)) as connection, connection:
             connection.executescript(
                 """
                 CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
@@ -207,7 +208,7 @@ class LocalApiSecurityTests(unittest.TestCase):
         database = LocalDatabase(legacy_path)
         database.initialize()
         self.assertEqual(database.get_settings()["theme"], "dark")
-        with sqlite3.connect(database_path) as connection:
+        with closing(sqlite3.connect(database_path)) as connection, connection:
             self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
             self.assertEqual(
                 [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")],
@@ -306,7 +307,7 @@ class LocalApiSecurityTests(unittest.TestCase):
         confirmed_status, confirmed_body, _ = self.upload("Копия.pdf", original, confirm_duplicate=True)
         self.assertEqual(confirmed_status, 201)
         self.assertTrue(json.loads(confirmed_body)["confirmed"])
-        with sqlite3.connect(self.data_directory / "officeai.sqlite3") as connection:
+        with closing(sqlite3.connect(self.data_directory / "officeai.sqlite3")) as connection, connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM stored_files").fetchone()[0], 1)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 2)
         _, journal_body, _ = self.request("/api/v1/operations", self.headers)
@@ -318,7 +319,7 @@ class LocalApiSecurityTests(unittest.TestCase):
         status, body, _ = self.upload("Безопасный.pdf", b"%PDF-1.7\nfixture")
         self.assertEqual(status, 201)
         document_id = json.loads(body)["document"]["id"]
-        with sqlite3.connect(self.data_directory / "officeai.sqlite3") as connection:
+        with closing(sqlite3.connect(self.data_directory / "officeai.sqlite3")) as connection, connection:
             connection.execute(
                 "UPDATE stored_files SET storage_key = ? WHERE id = "
                 "(SELECT stored_file_id FROM documents WHERE id = ?)",
@@ -429,7 +430,7 @@ class LocalApiSecurityTests(unittest.TestCase):
         restored = next((self.data_directory / "documents").glob("*.bin"))
         self.assertEqual(restored.read_bytes(), original)
         self.assertEqual(self.app.state.document_library.query()[1], 1)
-        with sqlite3.connect(self.data_directory / "officeai.sqlite3") as connection:
+        with closing(sqlite3.connect(self.data_directory / "officeai.sqlite3")) as connection, connection:
             operation_codes = {row[0] for row in connection.execute("SELECT operation_code FROM operation_log")}
         self.assertIn("backup_restored", operation_codes)
 

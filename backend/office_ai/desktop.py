@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
-import shutil
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -20,8 +25,13 @@ import uvicorn
 
 from office_ai.api.app import create_app
 from office_ai.application.backups import BackupService
+from office_ai.infrastructure.storage_paths import get_user_data_directory
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+if getattr(sys, "frozen", False):
+    # PyInstaller stores bundled resources below _MEIPASS in onedir builds.
+    ROOT_DIR = Path(getattr(sys, "_MEIPASS"))
+else:
+    ROOT_DIR = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = ROOT_DIR / "frontend"
 FRONTEND_DIST = FRONTEND_DIR / "dist"
 DEV_HOST = "127.0.0.1"
@@ -97,6 +107,7 @@ def _wait_for_vite(process: subprocess.Popen[bytes], timeout: float = 45.0) -> N
 def _start_backend(
     session_token: str,
     frontend_origin: str | None,
+    data_directory: Path | None = None,
 ) -> tuple[uvicorn.Server, threading.Thread, socket.socket, int, str, BackupService]:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind((DEV_HOST, 0))
@@ -109,8 +120,20 @@ def _start_backend(
         expected_origin=frontend_origin,
         session_token=session_token,
         frontend_dist=FRONTEND_DIST,
+        data_directory=data_directory,
     )
-    server = uvicorn.Server(uvicorn.Config(app, host=DEV_HOST, port=port, log_level="warning"))
+    # Uvicorn's default dictConfig resolves formatters dynamically, which PyInstaller
+    # can omit from frozen builds. The application does not rely on Uvicorn logs.
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host=DEV_HOST,
+            port=port,
+            log_level="warning",
+            log_config=None,
+            access_log=False,
+        )
+    )
     thread = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
     thread.start()
     deadline = time.monotonic() + 10
@@ -126,7 +149,12 @@ def _start_backend(
     return server, thread, listener, port, frontend_origin, app.state.backup_service
 
 
-def _open_window(url: str, bridge: DesktopBridge, *, debug: bool) -> None:
+def _open_window(url: str, bridge: DesktopBridge, *, debug: bool, smoke_test: bool = False) -> None:
+    if not _webview2_runtime_found():
+        raise RuntimeError(
+            "Не найден Microsoft Edge WebView2 Runtime. Установите Evergreen Runtime "
+            "с https://developer.microsoft.com/microsoft-edge/webview2/ и перезапустите Office AI."
+        )
     try:
         import webview
     except ImportError as error:
@@ -135,7 +163,7 @@ def _open_window(url: str, bridge: DesktopBridge, *, debug: bool) -> None:
             "в окружение разработчика и повторите запуск."
         ) from error
 
-    webview.create_window(
+    window = webview.create_window(
         "Office AI",
         url=url,
         js_api=bridge,
@@ -143,10 +171,108 @@ def _open_window(url: str, bridge: DesktopBridge, *, debug: bool) -> None:
         height=780,
         min_size=(920, 640),
     )
+    page_loaded = threading.Event()
+    if smoke_test:
+        def close_after_page_load() -> None:
+            page_loaded.set()
+            # Let WebView2 finish its first paint before closing the temporary window.
+            timer = threading.Timer(0.5, window.destroy)
+            timer.daemon = True
+            timer.start()
+
+        window.events.loaded += close_after_page_load
     webview.start(debug=debug)
+    if smoke_test and not page_loaded.is_set():
+        raise RuntimeError("Окно WebView2 закрылось до загрузки интерфейса.")
 
 
-def run(*, dev: bool) -> None:
+def _webview2_runtime_found() -> bool:
+    """Check common Evergreen WebView2 runtime locations without network access."""
+    if sys.platform != "win32":
+        return True
+    roots = {
+        Path(value)
+        for key, value in os.environ.items()
+        if key.casefold() in {"programfiles", "programfiles(x86)", "localappdata"} and value
+    }
+    for root in roots:
+        application_root = root / "Microsoft" / "EdgeWebView" / "Application"
+        try:
+            for version_directory in application_root.iterdir():
+                if version_directory.is_dir() and (version_directory / "msedgewebview2.exe").is_file():
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def run_self_test() -> None:
+    """Check the packaged static frontend and local API without opening a window."""
+    if not (FRONTEND_DIST / "index.html").is_file():
+        raise RuntimeError("В комплекте приложения отсутствует файл интерфейса index.html.")
+    if not _webview2_runtime_found():
+        raise RuntimeError("Не найден Microsoft Edge WebView2 Runtime.")
+
+    import secrets
+
+    token = secrets.token_urlsafe(32)
+    with tempfile.TemporaryDirectory(prefix="officeai-startup-check-") as temporary:
+        server: uvicorn.Server | None = None
+        thread: threading.Thread | None = None
+        listener: socket.socket | None = None
+        try:
+            server, thread, listener, port, origin, _ = _start_backend(
+                token,
+                None,
+                data_directory=Path(temporary),
+            )
+            base_url = f"http://{DEV_HOST}:{port}"
+            with urllib.request.urlopen(f"{base_url}/", timeout=5) as response:
+                if response.status != 200 or b"<html" not in response.read(256).lower():
+                    raise RuntimeError("Локальный сервер не отдал собранный интерфейс.")
+            request = urllib.request.Request(
+                f"{base_url}/api/v1/health",
+                headers={"Origin": origin, "X-OfficeAI-Token": token},
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                health = json.loads(response.read().decode("utf-8"))
+            if health.get("status") != "ok":
+                raise RuntimeError("Локальный API не прошёл проверку готовности.")
+        finally:
+            if server is not None:
+                server.should_exit = True
+            if thread is not None:
+                thread.join(timeout=5)
+            if listener is not None:
+                listener.close()
+
+
+def _log_startup_error(error: BaseException) -> None:
+    """Write a minimal diagnostic locally; never log request or document data."""
+    try:
+        log_directory = get_user_data_directory() / "logs"
+        log_directory.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        error_text = "".join(traceback.format_exception_only(type(error), error)).strip()
+        with (log_directory / "startup.log").open("a", encoding="utf-8") as log:
+            log.write(f"{timestamp} {error_text[:1000]}\n")
+            # Keep the call path for packaged startup failures; this log stays local.
+            stack = "".join(traceback.format_tb(error.__traceback__))
+            log.write(f"{stack[-6000:]}\n")
+    except Exception:
+        pass
+
+
+def _show_startup_error(error: BaseException) -> None:
+    _log_startup_error(error)
+    message = f"Office AI не удалось запустить.\n\n{error}"
+    if sys.platform == "win32":
+        ctypes.windll.user32.MessageBoxW(None, message, "Office AI", 0x10)
+    else:
+        print(message, file=sys.stderr)
+
+
+def run(*, dev: bool, gui_smoke_test: bool = False) -> None:
     import secrets
 
     vite: subprocess.Popen[bytes] | None = None
@@ -154,6 +280,7 @@ def run(*, dev: bool) -> None:
     thread: threading.Thread | None = None
     listener: socket.socket | None = None
     backup_service: BackupService | None = None
+    smoke_data: tempfile.TemporaryDirectory[str] | None = None
 
     try:
         if dev:
@@ -168,9 +295,12 @@ def run(*, dev: bool) -> None:
 
         # Production serves the SPA and API from one origin; development uses Vite.
         token = secrets.token_urlsafe(32)
+        if gui_smoke_test:
+            smoke_data = tempfile.TemporaryDirectory(prefix="officeai-gui-smoke-")
         server, thread, listener, port, frontend_origin, backup_service = _start_backend(
             token,
             frontend_origin if dev else None,
+            data_directory=Path(smoke_data.name) if smoke_data is not None else None,
         )
         bridge_token = token
 
@@ -180,7 +310,7 @@ def run(*, dev: bool) -> None:
             backup_service,
         )
         ui_url = frontend_origin if dev else f"http://{DEV_HOST}:{port}/"
-        _open_window(ui_url, bridge, debug=dev)
+        _open_window(ui_url, bridge, debug=dev, smoke_test=gui_smoke_test)
     finally:
         if server is not None:
             server.should_exit = True
@@ -194,16 +324,34 @@ def run(*, dev: bool) -> None:
             thread.join(timeout=5)
         if listener is not None:
             listener.close()
+        if smoke_data is not None:
+            smoke_data.cleanup()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Office AI desktop development launcher")
     parser.add_argument("--dev", action="store_true", help="Run Vite and enable pywebview developer tools")
+    parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--gui-smoke-test", action="store_true", help=argparse.SUPPRESS)
     arguments = parser.parse_args()
+    if arguments.self_test:
+        try:
+            run_self_test()
+        except Exception as error:
+            _log_startup_error(error)
+            raise SystemExit(1) from error
+        return
+    if arguments.gui_smoke_test:
+        try:
+            run(dev=False, gui_smoke_test=True)
+        except Exception as error:
+            _log_startup_error(error)
+            raise SystemExit(1) from error
+        return
     try:
         run(dev=arguments.dev)
     except Exception as error:  # A concise startup error is more useful than a traceback here.
-        print(f"Office AI не запущен: {error}", file=sys.stderr)
+        _show_startup_error(error)
         raise SystemExit(1) from error
 
 

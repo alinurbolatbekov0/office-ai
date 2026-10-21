@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -80,14 +81,14 @@ class BackupService:
         temporary_archive = work / "archive.zip"
         try:
             snapshot_path = work / "officeai.sqlite3"
-            with sqlite3.connect(database_path, timeout=5.0) as source:
-                with sqlite3.connect(snapshot_path) as snapshot:
+            with closing(sqlite3.connect(database_path, timeout=5.0)) as source, source:
+                with closing(sqlite3.connect(snapshot_path)) as snapshot, snapshot:
                     source.backup(snapshot)
             db_digest, db_size = _sha256(snapshot_path)
             if db_size > MAX_DATABASE_SIZE_BYTES:
                 raise InvalidBackup("Размер локальной базы превышает лимит резервного копирования.")
 
-            with sqlite3.connect(snapshot_path) as connection:
+            with closing(sqlite3.connect(snapshot_path)) as connection, connection:
                 connection.row_factory = sqlite3.Row
                 rows = connection.execute(
                     "SELECT id, storage_key, size_bytes, sha256 FROM stored_files ORDER BY id"
@@ -286,7 +287,7 @@ class BackupService:
     @staticmethod
     def _validate_database(database_path: Path, documents_root: Path, declared: dict[str, tuple[int, str]]) -> None:
         try:
-            with sqlite3.connect(f"file:{database_path.as_posix()}?mode=ro", uri=True, timeout=5.0) as connection:
+            with closing(sqlite3.connect(f"file:{database_path.as_posix()}?mode=ro", uri=True, timeout=5.0)) as connection, connection:
                 connection.row_factory = sqlite3.Row
                 if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                     raise InvalidBackup("База данных внутри архива повреждена.")
@@ -329,7 +330,7 @@ class BackupService:
             raise InvalidBackup("Текущая база данных выходит за пределы локальных данных.")
         if self.documents_root.exists() and not self.documents_root.resolve().is_relative_to(data_root):
             raise InvalidBackup("Текущий каталог документов выходит за пределы локальных данных.")
-        with sqlite3.connect(current_database, timeout=5.0) as connection:
+        with closing(sqlite3.connect(current_database, timeout=5.0)) as connection, connection:
             checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
             if checkpoint and checkpoint[0] != 0:
                 raise InvalidBackup("Не удалось подготовить базу данных к восстановлению.")
