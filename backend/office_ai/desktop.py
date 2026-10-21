@@ -245,6 +245,9 @@ def _log_startup_error(error: BaseException) -> None:
         error_text = "".join(traceback.format_exception_only(type(error), error)).strip()
         with (log_directory / "startup.log").open("a", encoding="utf-8") as log:
             log.write(f"{timestamp} {error_text[:1000]}\n")
+            # Keep the call path for packaged startup failures; this log stays local.
+            stack = "".join(traceback.format_tb(error.__traceback__))
+            log.write(f"{stack[-6000:]}\n")
     except Exception:
         pass
 
