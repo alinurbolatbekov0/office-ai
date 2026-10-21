@@ -39,6 +39,38 @@ export interface AgentTaskHistoryEntry {
   taskCode: string;
   outcome: "preview_ready";
   sourceCount: number;
+  hasResult: boolean;
+  createdAt: string;
+}
+
+export interface AIProviderStatus {
+  providerAvailable: boolean;
+  configured: boolean;
+  providerId: "openai";
+  modelId: string;
+}
+
+export interface AgentTransferDisclosure {
+  requestId: string;
+  providerId: "openai";
+  modelId: string;
+  agentId: string;
+  taskCode: string;
+  purpose: string;
+  items: Array<{ id: string; name: string; categories: string[] }>;
+  payloadPreview: string;
+  payloadSizeBytes: number;
+  payloadSha256: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface AgentTaskResult {
+  id: string;
+  historyId: string;
+  providerId: "openai";
+  modelId: string;
+  resultText: string;
   createdAt: string;
 }
 
@@ -250,6 +282,63 @@ export async function getAgentTasks(config: RuntimeConfig, agentId: string): Pro
 export async function getAgentTaskHistory(config: RuntimeConfig): Promise<AgentTaskHistoryEntry[]> {
   const response = await request<{ history: AgentTaskHistoryEntry[] }>(config, "agents/history?limit=20");
   return response.history;
+}
+
+export async function getAIProviderStatus(config: RuntimeConfig): Promise<AIProviderStatus> {
+  return request(config, "ai/status");
+}
+
+export async function saveOpenAIApiKey(config: RuntimeConfig, apiKey: string): Promise<void> {
+  await postJson<{ configured: boolean }>(config, "ai/key", { api_key: apiKey });
+}
+
+export async function deleteOpenAIApiKey(config: RuntimeConfig): Promise<void> {
+  await postJson<{ configured: boolean }>(config, "ai/key/delete", {});
+}
+
+export async function prepareAgentTransfer(
+  config: RuntimeConfig,
+  agentId: string,
+  taskCode: string,
+  documentIds: string[],
+  instruction: string,
+  historyId: string,
+): Promise<AgentTransferDisclosure> {
+  return postJson(config, `agents/${encodeURIComponent(agentId)}/tasks/${encodeURIComponent(taskCode)}/prepare-transfer`, {
+    document_ids: documentIds,
+    instruction,
+    history_id: historyId,
+  });
+}
+
+export async function executeAgentTransfer(
+  config: RuntimeConfig,
+  requestId: string,
+  confirmed: boolean,
+): Promise<{ cancelled: boolean; resultText?: string; historyId?: string }> {
+  return postJson(config, `ai/transfer/${encodeURIComponent(requestId)}/execute`, { confirmed });
+}
+
+export async function cancelAgentTransfer(config: RuntimeConfig, requestId: string): Promise<void> {
+  await postJson(config, `ai/transfer/${encodeURIComponent(requestId)}/cancel`, {});
+}
+
+export async function getAgentTaskResult(config: RuntimeConfig, historyId: string): Promise<AgentTaskResult> {
+  return request(config, `agents/history/${encodeURIComponent(historyId)}/result`);
+}
+
+async function postJson<T>(config: RuntimeConfig, resource: string, body: object): Promise<T> {
+  const response = await fetch(`${config.apiBaseUrl}/${resource}`, {
+    method: "POST",
+    headers: { "X-OfficeAI-Token": config.sessionToken, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? `Локальный API ответил с кодом ${response.status}.`);
+  }
+  return response.json() as Promise<T>;
 }
 
 export async function createAgentTaskPreview(
