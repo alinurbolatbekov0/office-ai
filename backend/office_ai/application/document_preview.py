@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import zlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
@@ -108,18 +109,24 @@ def _extract(path: Path, extension: str) -> str:
 
 
 def _read_xml(archive: ZipFile, member: str) -> ET.Element:
-    info = archive.getinfo(member)
+    try:
+        info = archive.getinfo(member)
+    except KeyError as error:
+        raise InvalidDocumentPreview("В документе отсутствует требуемый раздел.") from error
     if info.file_size > MAX_XML_MEMBER_BYTES:
         raise InvalidDocumentPreview("Внутренний XML-раздел слишком велик для безопасной обработки.")
-    with archive.open(info) as stream:
-        content = stream.read(MAX_XML_MEMBER_BYTES + 1)
+    try:
+        with archive.open(info) as stream:
+            content = stream.read(MAX_XML_MEMBER_BYTES + 1)
+    except (BadZipFile, EOFError, OSError, RuntimeError, zlib.error) as error:
+        raise InvalidDocumentPreview("Не удалось безопасно прочитать раздел документа.") from error
     if len(content) > MAX_XML_MEMBER_BYTES:
         raise InvalidDocumentPreview("Внутренний XML-раздел слишком велик для безопасной обработки.")
     if _FORBIDDEN_XML_DECLARATIONS.search(content):
         raise InvalidDocumentPreview("XML с пользовательскими объявлениями сущностей не поддерживается.")
     try:
         return ET.fromstring(content)
-    except ET.ParseError as error:
+    except (ET.ParseError, RecursionError) as error:
         raise InvalidDocumentPreview("Не удалось прочитать текстовую структуру документа.") from error
 
 
