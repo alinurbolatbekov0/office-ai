@@ -159,7 +159,7 @@ function App() {
               />
             ) : <PlaceholderPage title="Настройки" icon="⚙" />
           )}
-          {activeAgent && <AgentWorkspace agent={activeAgent} />}
+          {activeAgent && <AgentWorkspace agent={activeAgent} runtimeConfig={runtimeConfig} />}
         </div>
       </main>
     </div>
