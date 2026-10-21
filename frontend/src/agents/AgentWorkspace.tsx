@@ -4,6 +4,7 @@ import { definitions } from "./registry";
 import {
   cancelAgentTransfer,
   createAgentTaskPreview,
+  downloadAgentTaskResult,
   executeAgentTransfer,
   getAgentTasks,
   getAgentTaskHistory,
@@ -211,6 +212,15 @@ export default function AgentWorkspace({
     finally { setWorking(false); }
   }
 
+  async function downloadSavedResult(historyId: string) {
+    if (!runtimeConfig) return;
+    setWorking(true);
+    setError(null);
+    try { await downloadAgentTaskResult(runtimeConfig, historyId); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Не удалось скачать файл результата."); }
+    finally { setWorking(false); }
+  }
+
   return (
     <section className="agent-workspace">
       <header className="agent-page-heading">
@@ -315,7 +325,7 @@ export default function AgentWorkspace({
         </section>
       )}
 
-      {taskResult && <section className="agent-workspace-card agent-result-card"><div className="workspace-card-heading"><span>✓</span><div><h2>Результат агента</h2><p>{taskResult.modelId} · сохранён локально {formatDate(taskResult.createdAt)}</p></div></div><pre className="agent-preview-text">{taskResult.resultText}</pre></section>}
+      {taskResult && <section className="agent-workspace-card agent-result-card"><div className="workspace-card-heading"><span>✓</span><div><h2>Результат агента</h2><p>{taskResult.modelId} · сохранён локально {formatDate(taskResult.createdAt)}</p></div></div><pre className="agent-preview-text">{taskResult.resultText}</pre><div className="backup-actions"><button className="primary-button" type="button" disabled={working} onClick={() => void downloadSavedResult(taskResult.historyId)}>Скачать как {exportFormatLabel(agent.id)}</button></div></section>}
 
       <section className="agent-history-card" aria-labelledby="agent-history-title">
         <div className="workspace-card-heading"><span>04</span><div><h2 id="agent-history-title">Недавняя история</h2><p>Сохраняются только агент, задача, время и число источников.</p></div></div>
@@ -374,4 +384,10 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} Б`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`;
+}
+
+function exportFormatLabel(agentId: string): string {
+  if (agentId === "excel-analytics") return "XLSX";
+  if (agentId === "powerpoint-presentations") return "PPTX";
+  return "DOCX";
 }
