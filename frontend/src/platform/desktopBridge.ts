@@ -8,6 +8,7 @@ declare global {
     pywebview?: {
       api: {
         get_runtime_config: () => Promise<RuntimeConfig>;
+        save_backup: (backupId: string) => Promise<boolean>;
       };
     };
   }

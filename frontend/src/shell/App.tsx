@@ -145,10 +145,12 @@ function App() {
             settings ? (
               <SettingsPage
                 operations={operations}
+                runtimeConfig={runtimeConfig}
                 saveMessage={saveMessage}
                 savingKey={savingKey}
                 settings={settings}
                 onSave={handleSaveSetting}
+                onRestored={() => window.location.reload()}
               />
             ) : <PlaceholderPage title="Настройки" icon="⚙" />
           )}

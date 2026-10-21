@@ -47,6 +47,13 @@ export interface DocumentFilters {
   sortOrder?: "asc" | "desc";
 }
 
+export interface BackupFile {
+  id: string;
+  filename: string;
+  sizeBytes: number;
+  createdAt: string;
+}
+
 export class DuplicateDocumentError extends Error {
   constructor(readonly existingDocuments: LibraryDocument[]) {
     super("Такой файл уже есть в библиотеке.");
@@ -138,6 +145,45 @@ export async function downloadDocument(config: RuntimeConfig, document: LibraryD
   const link = documentLink(objectUrl, filename);
   link.click();
   window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+}
+
+export async function createBackup(config: RuntimeConfig): Promise<BackupFile> {
+  const response = await fetch(`${config.apiBaseUrl}/backups`, {
+    method: "POST",
+    headers: {
+      "X-OfficeAI-Token": config.sessionToken,
+      "Content-Type": "application/json",
+    },
+    body: "{}",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? `Не удалось создать резервную копию (код ${response.status}).`);
+  }
+  const backup = (await response.json()) as BackupFile;
+  const desktopApi = window.pywebview?.api;
+  if (!desktopApi) throw new Error("Системный диалог сохранения доступен только в окне Office AI.");
+  const saved = await desktopApi.save_backup(backup.id);
+  if (!saved) throw new Error("Сохранение резервной копии отменено. Внутренняя локальная копия сохранена.");
+  return backup;
+}
+
+export async function restoreBackup(config: RuntimeConfig, file: File): Promise<void> {
+  const response = await fetch(`${config.apiBaseUrl}/restore`, {
+    method: "POST",
+    headers: {
+      "X-OfficeAI-Token": config.sessionToken,
+      "Content-Type": "application/octet-stream",
+      "X-OfficeAI-Confirm-Restore": "true",
+    },
+    body: file,
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? `Не удалось восстановить данные (код ${response.status}).`);
+  }
 }
 
 function documentLink(url: string, filename: string): HTMLAnchorElement {

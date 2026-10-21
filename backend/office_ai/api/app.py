@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 from datetime import date
 from pathlib import Path
@@ -15,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from office_ai import __version__
 from office_ai.application.agent_catalog import list_agents
+from office_ai.application.backups import BackupService, InvalidBackup, MAX_BACKUP_SIZE_BYTES
 from office_ai.application.document_library import DocumentLibrary
 from office_ai.application.operation_journal import read_recent_operations
 from office_ai.application.settings import read_settings, update_setting
@@ -31,6 +33,7 @@ _ALLOWED_HEADERS: Final = {
     "content-type",
     "x-officeai-filename",
     "x-officeai-confirm-duplicate",
+    "x-officeai-confirm-restore",
 }
 
 
@@ -59,6 +62,10 @@ def create_app(
     database.record_operation("app_started", message_code="app_started")
     app.state.database = database
     app.state.document_library = DocumentLibrary(database)
+    app.state.backup_service = BackupService(database)
+    # Keep file/database operations serial for this single-user local app. This
+    # also ensures no upload or settings write overlaps a restore swap.
+    app.state.data_operation_lock = asyncio.Lock()
 
     @app.middleware("http")
     async def guard_local_requests(request: Request, call_next):
@@ -101,7 +108,8 @@ def create_app(
         if not secrets.compare_digest(supplied_token, session_token):
             return JSONResponse({"detail": "Сессия приложения не подтверждена."}, status_code=403)
 
-        response = await call_next(request)
+        async with app.state.data_operation_lock:
+            response = await call_next(request)
         response.headers["Access-Control-Allow-Origin"] = expected_origin
         response.headers["Vary"] = "Origin"
         response.headers["Cache-Control"] = "no-store"
@@ -212,6 +220,65 @@ def create_app(
             filename=filename,
             headers={"X-Content-Type-Options": "nosniff"},
         )
+
+    @app.post(f"{API_PREFIX}/backups", status_code=201)
+    async def create_backup(payload: dict[str, Any]) -> dict[str, Any]:
+        if payload != {}:
+            raise HTTPException(status_code=400, detail="Создание копии не принимает тело запроса.")
+        try:
+            result = app.state.backup_service.create_backup()
+        except InvalidBackup as error:
+            database.record_operation(
+                "backup_created",
+                outcome="failure",
+                message_code="backup_created",
+            )
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        database.record_operation("backup_created", message_code="backup_created")
+        return result
+
+    @app.get(f"{API_PREFIX}/backups/{{backup_id}}/download")
+    async def download_backup(backup_id: str) -> FileResponse:
+        result = app.state.backup_service.get_backup_download(backup_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Резервная копия не найдена.")
+        path, filename = result
+        return FileResponse(
+            path,
+            media_type="application/zip",
+            filename=filename,
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
+
+    @app.post(f"{API_PREFIX}/restore")
+    async def restore_backup(request: Request) -> dict[str, str]:
+        if request.headers.get("x-officeai-confirm-restore") != "true":
+            raise HTTPException(status_code=400, detail="Для восстановления требуется явное подтверждение.")
+        if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/octet-stream":
+            raise HTTPException(status_code=415, detail="Ожидался архив application/octet-stream.")
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > MAX_BACKUP_SIZE_BYTES:
+                    raise HTTPException(status_code=413, detail="Размер архива превышает ограничение 2 ГиБ.")
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail="Некорректный размер запроса.") from error
+
+        async def chunks():
+            async for chunk in request.stream():
+                yield chunk
+
+        upload_path: Path | None = None
+        try:
+            upload_path = await app.state.backup_service.receive_restore_upload(chunks())
+            app.state.backup_service.restore_archive(upload_path)
+        except InvalidBackup as error:
+            database.record_operation("backup_restore_rejected", outcome="failure", message_code="backup_restore_rejected")
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        finally:
+            if upload_path is not None:
+                upload_path.unlink(missing_ok=True)
+        return {"status": "restored"}
 
     if frontend_dist is not None and (frontend_dist / "index.html").is_file():
         app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
