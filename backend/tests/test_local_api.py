@@ -17,6 +17,8 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import io
 
 from fastapi import FastAPI
+from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from office_ai.api.app import AgentPreviewRequest, create_app
 from office_ai.application.backups import BackupService, InvalidBackup
@@ -299,6 +301,28 @@ class LocalApiSecurityTests(unittest.TestCase):
                 archive.writestr(name, content)
         return buffer.getvalue()
 
+    @staticmethod
+    def pdf_fixture(text: str | None) -> bytes:
+        writer = PdfWriter()
+        page = writer.add_blank_page(width=612, height=792)
+        if text:
+            font = DictionaryObject()
+            font[NameObject("/F1")] = writer._add_object(
+                DictionaryObject({
+                    NameObject("/Type"): NameObject("/Font"),
+                    NameObject("/Subtype"): NameObject("/Type1"),
+                    NameObject("/BaseFont"): NameObject("/Helvetica"),
+                })
+            )
+            page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): font})
+            stream = DecodedStreamObject()
+            escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            stream.set_data(f"BT /F1 12 Tf 72 720 Td ({escaped}) Tj ET".encode("ascii"))
+            page[NameObject("/Contents")] = writer._add_object(stream)
+        output = io.BytesIO()
+        writer.write(output)
+        return output.getvalue()
+
     def preview(self, agent: str, task: str, document_ids: list[str], instruction: str = "") -> dict[str, object]:
         return self.app.state.document_preview.create(
             agent_id=agent,
@@ -543,7 +567,7 @@ class LocalApiSecurityTests(unittest.TestCase):
         preview_text = result["payloadPreview"]
         self.assertLess(preview_text.index("Слайд первый"), preview_text.index("Слайд второй"))
 
-    def test_preview_rejects_xml_entities_unsupported_pdf_and_wrong_task_category(self) -> None:
+    def test_preview_rejects_xml_entities_malformed_pdf_and_wrong_task_category(self) -> None:
         unsafe_xml = (
             '<!DOCTYPE w:document [<!ENTITY local SYSTEM "file:///not-read">]>'
             '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
@@ -565,6 +589,27 @@ class LocalApiSecurityTests(unittest.TestCase):
             self.preview("document-management", "consolidate-files", [pdf_id])
         with self.assertRaises(InvalidDocumentPreview):
             self.preview("excel-analytics", "summarize-workbook", [unsafe_id])
+
+    def test_text_pdf_preview_is_local_and_scanned_pdf_is_rejected_without_ocr(self) -> None:
+        source_text = "Synthetic PDF text"
+        original = self.pdf_fixture(source_text)
+        status, uploaded, _ = self.upload("Synthetic.pdf", original)
+        self.assertEqual(status, 201)
+        document_id = json.loads(uploaded)["document"]["id"]
+        path, _ = self.app.state.document_library.get_download(document_id)
+        before = path.read_bytes()
+
+        result = self.preview("document-management", "consolidate-files", [document_id])
+
+        self.assertIn(source_text, result["payloadPreview"])
+        self.assertIn("Страница 1", result["payloadPreview"])
+        self.assertEqual(before, path.read_bytes())
+
+        status, uploaded, _ = self.upload("Scanned.pdf", self.pdf_fixture(None))
+        self.assertEqual(status, 201)
+        scanned_id = json.loads(uploaded)["document"]["id"]
+        with self.assertRaisesRegex(InvalidDocumentPreview, "OCR отключён"):
+            self.preview("document-management", "consolidate-files", [scanned_id])
 
     def test_backup_round_trip_restores_database_and_original_documents(self) -> None:
         original = b"%PDF-1.7\nsynthetic backup fixture\n%%EOF"
