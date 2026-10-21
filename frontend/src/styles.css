@@ -306,6 +306,30 @@ button { font: inherit; }
 .agent-result-preview { background: #f8f8fc; border-radius: 8px; display: flex; flex-direction: column; gap: 7px; padding: 13px; }
 .agent-result-preview strong { color: #525866; font-size: 10px; }
 .agent-result-preview p { color: #8d95a3; font-size: 9px; line-height: 1.65; margin: 0; }
+.agent-input-form { display: flex; flex-direction: column; gap: 9px; margin-top: 18px; }
+.agent-field-label { color: #525866; font-size: 10px; font-weight: 650; }
+.agent-input-form select, .agent-input-form textarea { background: #fff; border: 1px solid #e2e5eb; border-radius: 7px; color: #3c4250; font: inherit; font-size: 10px; outline: none; padding: 10px 11px; width: 100%; }
+.agent-input-form select:focus, .agent-input-form textarea:focus { border-color: #8179ed; box-shadow: 0 0 0 2px #8179ed20; }
+.agent-input-form textarea { line-height: 1.6; resize: vertical; }
+.agent-task-purpose { color: #858d9b; font-size: 9px; line-height: 1.6; margin: -3px 0 5px; }
+.agent-document-picker { border: 1px solid #eceef2; border-radius: 8px; max-height: 230px; overflow: auto; padding: 8px; }
+.agent-picker-heading { align-items: center; color: #525866; display: flex; font-size: 9px; justify-content: space-between; padding: 3px 2px 7px; }
+.agent-picker-heading span { color: #959daa; font-weight: 400; }
+.agent-document-option { align-items: center; border-top: 1px solid #f0f1f4; cursor: pointer; display: flex; gap: 9px; min-width: 0; padding: 8px 2px; }
+.agent-document-option input { accent-color: #655ce0; flex: 0 0 auto; }
+.agent-document-name { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.agent-document-name strong { color: #535a68; font-size: 9px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-document-name small, .agent-inline-message { color: #959daa; font-size: 9px; }
+.agent-inline-message { line-height: 1.6; margin: 8px 2px; }
+.agent-input-form .primary-button { align-self: flex-start; font-size: 10px; margin-top: 3px; }
+.agent-error { background: #fff0f0; border: 1px solid #f1cccc; border-radius: 8px; color: #a2444a; font-size: 10px; line-height: 1.6; margin-top: 12px; padding: 10px 12px; }
+.agent-preview-card { margin-top: 14px; }
+.agent-preview-sources { display: flex; flex-direction: column; gap: 7px; list-style: none; margin: 15px 0; padding: 0; }
+.agent-preview-sources li { display: flex; flex-direction: column; gap: 4px; }
+.agent-preview-sources strong { color: #535a68; font-size: 10px; }
+.agent-preview-sources span, .agent-preview-footnote { color: #858d9b; font-size: 9px; }
+.agent-preview-text { background: #fafafd; border: 1px solid #eceef2; border-radius: 8px; color: #4d5360; font-family: Consolas, monospace; font-size: 10px; line-height: 1.6; margin: 0; max-height: 430px; overflow: auto; padding: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-preview-footnote { line-height: 1.6; margin: 9px 0 0; }
 .agent-privacy-note { align-items: flex-start; background: #edf8f2; border: 1px solid #e0f0e7; border-radius: 9px; color: #52866d; display: flex; gap: 10px; margin-top: 14px; padding: 13px 15px; }
 .agent-privacy-note > span { font-size: 16px; }
 .agent-privacy-note strong { font-size: 10px; }
@@ -324,6 +348,17 @@ button:focus-visible { outline: 3px solid #8179ed; outline-offset: 2px; }
 :root[data-theme="dark"] .planned-task-list li { border-color: #2c3240; color: #b4bbc7; }
 :root[data-theme="dark"] .agent-empty-stage,
 :root[data-theme="dark"] .agent-result-preview { background: #171a23; border-color: #373e4d; }
+:root[data-theme="dark"] .agent-input-form select,
+:root[data-theme="dark"] .agent-input-form textarea { background: #171a23; border-color: #373e4d; color: #e3e6ed; }
+:root[data-theme="dark"] .agent-field-label,
+:root[data-theme="dark"] .agent-picker-heading,
+:root[data-theme="dark"] .agent-preview-sources strong { color: #e3e6ed; }
+:root[data-theme="dark"] .agent-document-picker,
+:root[data-theme="dark"] .agent-preview-text { background: #171a23; border-color: #373e4d; }
+:root[data-theme="dark"] .agent-document-option { border-color: #2c3240; }
+:root[data-theme="dark"] .agent-document-name strong,
+:root[data-theme="dark"] .agent-preview-text { color: #d1d6e0; }
+:root[data-theme="dark"] .agent-error { background: #382326; border-color: #57363a; color: #f0a7ab; }
 :root[data-theme="dark"] .agent-status-pill { background: #252a36; border-color: #373e4d; color: #b5bbc6; }
 :root[data-theme="dark"] .agent-privacy-note { background: #1c3028; border-color: #284b3a; }
 :root[data-theme="dark"] .agent-privacy-note p { color: #9bb8a7; }
