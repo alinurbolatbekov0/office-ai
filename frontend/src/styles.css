@@ -118,6 +118,10 @@ button { font: inherit; }
 .setting-row small { color: #989fac; font-size: 9px; }
 .setting-row select { background: #fff; border: 1px solid #dfe3e9; border-radius: 6px; color: #4c5361; font: inherit; font-size: 10px; min-width: 110px; padding: 8px 25px 8px 10px; }
 .setting-row select:focus { border-color: #827be7; outline: 2px solid #827be733; }
+.ai-key-form { padding-bottom: 13px; }
+.ai-key-row input[type="password"] { background: #fbfbfd; border: 1px solid #dfe3e9; border-radius: 6px; color: #4c5361; font: 11px Consolas, monospace; max-width: 380px; min-width: min(38vw, 260px); padding: 9px 10px; }
+.ai-key-row input[type="password"]:focus { border-color: #827be7; outline: 2px solid #827be733; }
+.ai-provider-card .backup-warning { margin-bottom: 5px; }
 .setting-row input[type="checkbox"] { accent-color: #655ce0; height: 16px; margin: 0 3px 0 14px; width: 16px; }
 .settings-feedback { background: #edf8f2; border-radius: 6px; color: #488465; font-size: 10px; margin: -1px 0 14px; padding: 10px 12px; }
 .settings-feedback.error { background: #fff0ef; color: #ae625e; }
@@ -223,6 +227,7 @@ button { font: inherit; }
 :root[data-theme="dark"] .operation-row,
 :root[data-theme="dark"] .empty-operations { border-color: #2c3240; }
 :root[data-theme="dark"] .setting-row select { background: #171a23; border-color: #373e4d; color: #d9dce4; }
+:root[data-theme="dark"] .ai-key-row input[type="password"] { background: #171a23; border-color: #373e4d; color: #d9dce4; }
 :root[data-theme="dark"] .library-toolbar select,
 :root[data-theme="dark"] .date-filter,
 :root[data-theme="dark"] .sort-direction,
@@ -342,6 +347,16 @@ button { font: inherit; }
 .agent-preview-sources span, .agent-preview-footnote { color: #858d9b; font-size: 9px; }
 .agent-preview-text { background: #fafafd; border: 1px solid #eceef2; border-radius: 8px; color: #4d5360; font-family: Consolas, monospace; font-size: 10px; line-height: 1.6; margin: 0; max-height: 430px; overflow: auto; padding: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .agent-preview-footnote { line-height: 1.6; margin: 9px 0 0; }
+.transfer-card, .agent-result-card { margin-top: 14px; }
+.transfer-warning { background: #fff4e6; border: 1px solid #f1d5ae; border-radius: 8px; color: #805322; font-size: 10px; line-height: 1.65; padding: 11px 13px; }
+.transfer-meta { display: grid; gap: 8px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 13px 0; }
+.transfer-meta div { min-width: 0; }
+.transfer-meta dt { color: #8b92a0; font-size: 9px; }
+.transfer-meta dd { color: #535a68; font-size: 10px; line-height: 1.5; margin: 3px 0 0; overflow-wrap: anywhere; }
+.transfer-consent { align-items: flex-start; color: #535a68; display: flex; font-size: 10px; gap: 9px; line-height: 1.6; margin: 13px 0; }
+.transfer-consent input { accent-color: #655ce0; flex: 0 0 auto; margin-top: 2px; }
+.text-button { background: none; border: 0; color: #655ce0; cursor: pointer; font-size: 9px; }
+.agent-status-pill.ready { color: #2d7c5a; }
 .agent-privacy-note { align-items: flex-start; background: #edf8f2; border: 1px solid #e0f0e7; border-radius: 9px; color: #52866d; display: flex; gap: 10px; margin-top: 14px; padding: 13px 15px; }
 .agent-privacy-note > span { font-size: 16px; }
 .agent-privacy-note strong { font-size: 10px; }
@@ -371,6 +386,9 @@ button:focus-visible { outline: 3px solid #8179ed; outline-offset: 2px; }
 :root[data-theme="dark"] .agent-document-option { border-color: #2c3240; }
 :root[data-theme="dark"] .agent-document-name strong,
 :root[data-theme="dark"] .agent-preview-text { color: #d1d6e0; }
+:root[data-theme="dark"] .transfer-warning { background: #382d20; border-color: #5c472b; color: #e7c18d; }
+:root[data-theme="dark"] .transfer-meta dd, :root[data-theme="dark"] .transfer-consent { color: #d1d6e0; }
+:root[data-theme="dark"] .transfer-meta dt { color: #9ca4b2; }
 :root[data-theme="dark"] .agent-error { background: #382326; border-color: #57363a; color: #f0a7ab; }
 :root[data-theme="dark"] .agent-status-pill { background: #252a36; border-color: #373e4d; color: #b5bbc6; }
 :root[data-theme="dark"] .agent-privacy-note { background: #1c3028; border-color: #284b3a; }
