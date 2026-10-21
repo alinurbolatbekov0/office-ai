@@ -3,7 +3,9 @@
 import asyncio
 import json
 import sqlite3
+import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit
@@ -15,6 +17,7 @@ import io
 from office_ai.api.app import create_app
 from office_ai.application.backups import BackupService, InvalidBackup
 from office_ai.domain.documents import InvalidDocument
+from office_ai.desktop import DesktopBridge, RuntimeConfig
 from office_ai.infrastructure.database import LocalDatabase
 from office_ai.infrastructure.storage_paths import get_user_data_directory
 
@@ -387,6 +390,18 @@ class LocalApiSecurityTests(unittest.TestCase):
         self.assertTrue((self.data_directory / "backups" / f"{backup['id']}.zip").is_file())
         _, journal, _ = self.request("/api/v1/operations", self.headers)
         self.assertIn("backup_created", journal.decode())
+
+    def test_desktop_bridge_saves_backup_to_user_selected_path(self) -> None:
+        service: BackupService = self.app.state.backup_service
+        backup = service.create_backup()
+        source = self.data_directory / "backups" / f"{backup['id']}.zip"
+        destination = self.data_directory / "user-selected-copy.zip"
+        fake_window = SimpleNamespace(create_file_dialog=lambda *args, **kwargs: [str(destination)])
+        fake_webview = SimpleNamespace(SAVE_DIALOG=2, windows=[fake_window])
+        bridge = DesktopBridge(RuntimeConfig("http://127.0.0.1/api/v1", "synthetic-token"), service)
+        with patch.dict(sys.modules, {"webview": fake_webview}):
+            self.assertTrue(bridge.save_backup(backup["id"]))
+        self.assertEqual(destination.read_bytes(), source.read_bytes())
 
 if __name__ == "__main__":
     unittest.main()
