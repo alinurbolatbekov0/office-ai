@@ -4,9 +4,11 @@ import { definitions } from "./registry";
 import {
   createAgentTaskPreview,
   getAgentTasks,
+  getAgentTaskHistory,
   getDocuments,
   type AgentTask,
   type AgentTaskPreview,
+  type AgentTaskHistoryEntry,
   type LibraryDocument,
 } from "../platform/localApi";
 import type { RuntimeConfig } from "../platform/desktopBridge";
@@ -32,6 +34,7 @@ export default function AgentWorkspace({
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [instruction, setInstruction] = useState("");
   const [preview, setPreview] = useState<AgentTaskPreview | null>(null);
+  const [history, setHistory] = useState<AgentTaskHistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -50,12 +53,13 @@ export default function AgentWorkspace({
       setLoading(false);
       return;
     }
-    Promise.all([getAgentTasks(runtimeConfig, agent.id), getDocuments(runtimeConfig)])
-      .then(([nextTasks, response]) => {
+    Promise.all([getAgentTasks(runtimeConfig, agent.id), getDocuments(runtimeConfig), getAgentTaskHistory(runtimeConfig)])
+      .then(([nextTasks, response, taskHistory]) => {
         if (!active) return;
         setTasks(nextTasks);
         setTaskCode(nextTasks[0]?.code || "");
         setDocuments(response.documents);
+        setHistory(taskHistory);
       })
       .catch((reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : "Не удалось загрузить данные агента.");
@@ -96,7 +100,9 @@ export default function AgentWorkspace({
     setError(null);
     setPreview(null);
     try {
-      setPreview(await createAgentTaskPreview(runtimeConfig, agent.id, task.code, selectedIds, instruction));
+      const result = await createAgentTaskPreview(runtimeConfig, agent.id, task.code, selectedIds, instruction);
+      setPreview(result);
+      if (result.historyEntry) setHistory((current) => [result.historyEntry!, ...current].slice(0, 20));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось сформировать предпросмотр.");
     } finally {
@@ -178,12 +184,41 @@ export default function AgentWorkspace({
         </section>
       )}
 
+      <section className="agent-history-card" aria-labelledby="agent-history-title">
+        <div className="workspace-card-heading"><span>04</span><div><h2 id="agent-history-title">Недавняя история</h2><p>Сохраняются только агент, задача, время и число источников.</p></div></div>
+        {history.length === 0 ? <p className="agent-inline-message">История появится после первого локального предпросмотра.</p> : (
+          <ul className="agent-history-list">
+            {history.map((entry) => <li key={entry.id}>
+              <span><strong>{agentNames[entry.agentId] ?? entry.agentId}</strong><small>{entry.taskCode} · {entry.sourceCount} {pluralDocuments(entry.sourceCount)}</small></span>
+              <time dateTime={entry.createdAt}>{formatDate(entry.createdAt)}</time>
+            </li>)}
+          </ul>
+        )}
+      </section>
+
       <div className="agent-privacy-note" role="note">
         <span aria-hidden="true">⌑</span>
         <div><strong>Предпросмотр выполняется локально</strong><p>Извлекается текст DOCX, сохранённые значения XLSX и текст слайдов PPTX. Формулы не вычисляются. PDF и изображения пока не обрабатываются. ИИ-вызовов и передачи данных нет.</p></div>
       </div>
     </section>
   );
+}
+
+const agentNames: Record<string, string> = {
+  "document-management": "Документооборот",
+  "business-correspondence": "Деловая переписка",
+  "excel-analytics": "Excel-аналитика",
+  "powerpoint-presentations": "Презентации PowerPoint",
+};
+
+function pluralDocuments(count: number): string {
+  if (count === 1) return "документ";
+  if (count >= 2 && count <= 4) return "документа";
+  return "документов";
+}
+
+function formatDate(value: string): string {
+  return new Intl.DateTimeFormat("ru-RU", { dateStyle: "short", timeStyle: "short" }).format(new Date(value));
 }
 
 function formatBytes(bytes: number): string {
