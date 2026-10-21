@@ -1,6 +1,7 @@
 """Focused checks for the scaffold's local API boundary."""
 
 import asyncio
+import hashlib
 import json
 import sqlite3
 import sys
@@ -14,10 +15,12 @@ from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 import io
 
+from fastapi import FastAPI
+
 from office_ai.api.app import create_app
 from office_ai.application.backups import BackupService, InvalidBackup
 from office_ai.domain.documents import InvalidDocument
-from office_ai.desktop import DesktopBridge, RuntimeConfig
+from office_ai.desktop import DesktopBridge, RuntimeConfig, _start_backend
 from office_ai.infrastructure.database import LocalDatabase
 from office_ai.infrastructure.storage_paths import get_user_data_directory
 
@@ -39,6 +42,32 @@ class LocalApiSecurityTests(unittest.TestCase):
             "origin": "http://127.0.0.1:5173",
             "x-officeai-token": "test-session-token",
         }
+
+    def test_backend_listener_binds_only_to_ipv4_loopback(self) -> None:
+        stub_app = FastAPI()
+        stub_app.state.backup_service = object()
+        listener = SimpleNamespace(
+            getsockname=lambda: ("127.0.0.1", 43128),
+            bind=lambda address: setattr(listener, "bound", address),
+            listen=lambda _limit: None,
+        )
+        server = SimpleNamespace(started=True, should_exit=False, run=lambda **_kwargs: None)
+        thread = SimpleNamespace(start=lambda: None, is_alive=lambda: True)
+        with (
+            patch("office_ai.desktop.create_app", return_value=stub_app),
+            patch("office_ai.desktop.socket.socket", return_value=listener) as socket_factory,
+            patch("office_ai.desktop.uvicorn.Config") as config_factory,
+            patch("office_ai.desktop.uvicorn.Server", return_value=server),
+            patch("office_ai.desktop.threading.Thread", return_value=thread),
+        ):
+            _, _, _, port, _, _ = _start_backend(
+                "synthetic-session-token",
+                "http://127.0.0.1:5173",
+            )
+        self.assertEqual(port, 43128)
+        self.assertEqual(listener.bound, ("127.0.0.1", 0))
+        socket_factory.assert_called_once()
+        self.assertEqual(config_factory.call_args.kwargs["host"], "127.0.0.1")
 
     def request(
         self,
@@ -265,7 +294,9 @@ class LocalApiSecurityTests(unittest.TestCase):
         self.assertEqual(len(json.loads(duplicate_body)["existingDocuments"]), 1)
 
         path, download_name = self.app.state.document_library.get_download(document["id"])
-        self.assertEqual(path.read_bytes(), original)
+        downloaded = path.read_bytes()
+        self.assertEqual(downloaded, original)
+        self.assertEqual(hashlib.sha256(downloaded).hexdigest(), document["sha256"])
         self.assertEqual(download_name, "Тестовый отчёт.pdf")
         self.assertEqual(
             self.request("/api/v1/documents/not-a-uuid/download", self.headers)[0],
@@ -282,6 +313,37 @@ class LocalApiSecurityTests(unittest.TestCase):
         journal = journal_body.decode()
         self.assertNotIn("synthetic anonymized test fixture", journal)
         self.assertNotIn("Тестовый отчёт.pdf", journal)
+
+    def test_download_refuses_storage_key_outside_document_root(self) -> None:
+        status, body, _ = self.upload("Безопасный.pdf", b"%PDF-1.7\nfixture")
+        self.assertEqual(status, 201)
+        document_id = json.loads(body)["document"]["id"]
+        with sqlite3.connect(self.data_directory / "officeai.sqlite3") as connection:
+            connection.execute(
+                "UPDATE stored_files SET storage_key = ? WHERE id = "
+                "(SELECT stored_file_id FROM documents WHERE id = ?)",
+                ("documents/../../outside.bin", document_id),
+            )
+
+        self.assertEqual(
+            self.request(f"/api/v1/documents/{document_id}/download", self.headers)[0],
+            404,
+        )
+
+    def test_all_supported_office_open_xml_containers_are_detected(self) -> None:
+        main_parts = {
+            "xlsx": ("XLSX", "xl/workbook.xml"),
+            "pptx": ("PPTX", "ppt/presentation.xml"),
+        }
+        for extension, (expected_type, main_part) in main_parts.items():
+            with self.subTest(extension=extension):
+                buffer = io.BytesIO()
+                with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
+                    archive.writestr("[Content_Types].xml", "<Types/>")
+                    archive.writestr(main_part, "<root/>")
+                status, body, _ = self.upload(f"Тест.{extension}", buffer.getvalue())
+                self.assertEqual(status, 201)
+                self.assertEqual(json.loads(body)["document"]["type"], expected_type)
 
     def test_upload_limit_stops_streaming_and_cleans_temporary_file(self) -> None:
         library = self.app.state.document_library
@@ -306,6 +368,14 @@ class LocalApiSecurityTests(unittest.TestCase):
         )
         self.assertEqual(self.upload("пиксель.png", png_chunks)[0], 201)
         self.assertEqual(self.upload("not-image.jpg", b"\xff\xd8\xffbroken")[0], 422)
+
+    def test_jpeg_and_jpg_extensions_are_both_supported(self) -> None:
+        for extension in ("jpg", "jpeg"):
+            with self.subTest(extension=extension):
+                fixture = b"\xff\xd8\xffsynthetic-image-" + extension.encode("ascii") + b"\xff\xd9"
+                status, body, _ = self.upload(f"фото.{extension}", fixture)
+                self.assertEqual(status, 201)
+                self.assertEqual(json.loads(body)["document"]["type"], "JPEG")
 
     def test_file_signatures_extensions_and_original_names_are_validated(self) -> None:
         mismatch_status = self.upload("fake.png", b"%PDF-1.7\\nnot a PNG")[0]
@@ -380,6 +450,14 @@ class LocalApiSecurityTests(unittest.TestCase):
             service.restore_archive(malicious_archive)
         self.assertFalse((self.data_directory.parent / "escape").exists())
         self.assertEqual(self.app.state.database.get_settings()["theme"], original_setting)
+
+    def test_restore_api_requires_explicit_confirmation_before_reading_archive(self) -> None:
+        headers = {**self.headers, "content-type": "application/octet-stream"}
+        status, body, _ = self.request("/api/v1/restore", headers, method="POST", body=b"not-an-archive")
+        self.assertEqual(status, 400)
+        self.assertIn("подтверждение", body.decode().lower())
+        backup_directory = self.data_directory / "backups"
+        self.assertFalse(backup_directory.exists())
 
     def test_backup_api_creates_a_generated_local_archive(self) -> None:
         headers = {**self.headers, "content-type": "application/json"}
