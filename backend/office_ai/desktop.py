@@ -138,7 +138,7 @@ def _start_backend(
     return server, thread, listener, port, frontend_origin, app.state.backup_service
 
 
-def _open_window(url: str, bridge: DesktopBridge, *, debug: bool) -> None:
+def _open_window(url: str, bridge: DesktopBridge, *, debug: bool, smoke_test: bool = False) -> None:
     if not _webview2_runtime_found():
         raise RuntimeError(
             "Не найден Microsoft Edge WebView2 Runtime. Установите Evergreen Runtime "
@@ -152,7 +152,7 @@ def _open_window(url: str, bridge: DesktopBridge, *, debug: bool) -> None:
             "в окружение разработчика и повторите запуск."
         ) from error
 
-    webview.create_window(
+    window = webview.create_window(
         "Office AI",
         url=url,
         js_api=bridge,
@@ -160,7 +160,19 @@ def _open_window(url: str, bridge: DesktopBridge, *, debug: bool) -> None:
         height=780,
         min_size=(920, 640),
     )
+    page_loaded = threading.Event()
+    if smoke_test:
+        def close_after_page_load() -> None:
+            page_loaded.set()
+            # Let WebView2 finish its first paint before closing the temporary window.
+            timer = threading.Timer(0.5, window.destroy)
+            timer.daemon = True
+            timer.start()
+
+        window.events.loaded += close_after_page_load
     webview.start(debug=debug)
+    if smoke_test and not page_loaded.is_set():
+        raise RuntimeError("Окно WebView2 закрылось до загрузки интерфейса.")
 
 
 def _webview2_runtime_found() -> bool:
@@ -246,7 +258,7 @@ def _show_startup_error(error: BaseException) -> None:
         print(message, file=sys.stderr)
 
 
-def run(*, dev: bool) -> None:
+def run(*, dev: bool, gui_smoke_test: bool = False) -> None:
     import secrets
 
     vite: subprocess.Popen[bytes] | None = None
@@ -254,6 +266,7 @@ def run(*, dev: bool) -> None:
     thread: threading.Thread | None = None
     listener: socket.socket | None = None
     backup_service: BackupService | None = None
+    smoke_data: tempfile.TemporaryDirectory[str] | None = None
 
     try:
         if dev:
@@ -268,9 +281,12 @@ def run(*, dev: bool) -> None:
 
         # Production serves the SPA and API from one origin; development uses Vite.
         token = secrets.token_urlsafe(32)
+        if gui_smoke_test:
+            smoke_data = tempfile.TemporaryDirectory(prefix="officeai-gui-smoke-")
         server, thread, listener, port, frontend_origin, backup_service = _start_backend(
             token,
             frontend_origin if dev else None,
+            data_directory=Path(smoke_data.name) if smoke_data is not None else None,
         )
         bridge_token = token
 
@@ -280,7 +296,7 @@ def run(*, dev: bool) -> None:
             backup_service,
         )
         ui_url = frontend_origin if dev else f"http://{DEV_HOST}:{port}/"
-        _open_window(ui_url, bridge, debug=dev)
+        _open_window(ui_url, bridge, debug=dev, smoke_test=gui_smoke_test)
     finally:
         if server is not None:
             server.should_exit = True
@@ -294,16 +310,26 @@ def run(*, dev: bool) -> None:
             thread.join(timeout=5)
         if listener is not None:
             listener.close()
+        if smoke_data is not None:
+            smoke_data.cleanup()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Office AI desktop development launcher")
     parser.add_argument("--dev", action="store_true", help="Run Vite and enable pywebview developer tools")
     parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--gui-smoke-test", action="store_true", help=argparse.SUPPRESS)
     arguments = parser.parse_args()
     if arguments.self_test:
         try:
             run_self_test()
+        except Exception as error:
+            _log_startup_error(error)
+            raise SystemExit(1) from error
+        return
+    if arguments.gui_smoke_test:
+        try:
+            run(dev=False, gui_smoke_test=True)
         except Exception as error:
             _log_startup_error(error)
             raise SystemExit(1) from error
