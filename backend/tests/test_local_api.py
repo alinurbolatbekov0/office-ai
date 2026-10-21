@@ -20,7 +20,7 @@ from fastapi import FastAPI
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
-from office_ai.api.app import AgentPreviewRequest, create_app
+from office_ai.api.app import AgentPreviewRequest, AgentTransferConfirmRequest, AgentTransferPrepareRequest, create_app
 from office_ai.application.backups import BackupService, InvalidBackup
 from office_ai.application.document_preview import InvalidDocumentPreview
 from office_ai.domain.documents import InvalidDocument
@@ -179,10 +179,10 @@ class LocalApiSecurityTests(unittest.TestCase):
         self.assertTrue(database_path.is_file())
         self.assertEqual(database_path.parent, self.data_directory)
         with closing(sqlite3.connect(database_path)) as connection, connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
             self.assertEqual(
                 connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
-                3,
+                4,
             )
             self.assertIn(
                 "documents",
@@ -212,10 +212,10 @@ class LocalApiSecurityTests(unittest.TestCase):
         database.initialize()
         self.assertEqual(database.get_settings()["theme"], "dark")
         with closing(sqlite3.connect(database_path)) as connection, connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
             self.assertEqual(
                 [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")],
-                [1, 2, 3],
+                [1, 2, 3, 4],
             )
 
     def test_windows_data_directory_uses_local_app_data(self) -> None:
@@ -523,6 +523,86 @@ class LocalApiSecurityTests(unittest.TestCase):
         self.assertNotIn("payload", history_columns)
         self.assertNotIn(source_text, repr(persisted_row))
 
+    def test_ai_transfer_api_requires_an_explicit_confirmation_and_stores_only_result(self) -> None:
+        source_text = "Synthetic approved-only source"
+        original = self.office_fixture(
+            "docx",
+            {
+                "word/document.xml": (
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                    f"<w:body><w:p><w:r><w:t>{source_text}</w:t></w:r></w:p></w:body></w:document>"
+                )
+            },
+        )
+        status, uploaded, _ = self.upload("Synthetic approval.docx", original)
+        self.assertEqual(status, 201)
+        document_id = json.loads(uploaded)["document"]["id"]
+        preview = self.preview("document-management", "consolidate-files", [document_id])
+        history = self.app.state.database.record_agent_preview(
+            "document-management", "consolidate-files", len(preview["sources"])
+        )
+
+        class FakeCredentials:
+            def read_api_key(self):
+                return "sk-synthetic-api-key-for-tests-only"
+
+            def save_api_key(self, _value):
+                raise AssertionError("Test must not save a real API key")
+
+            def delete_api_key(self):
+                return None
+
+        class FakeProvider:
+            def __init__(self):
+                self.calls = []
+
+            def generate(self, payload, api_key):
+                self.calls.append((payload, api_key))
+                return "Synthetic AI draft"
+
+        self.app.state.credential_store = FakeCredentials()
+        self.app.state.openai_adapter = FakeProvider()
+        self.app.state.agent_request_service = None
+        prepare_route = next(
+            route for route in self.app.routes
+            if getattr(route, "path", None) == "/api/v1/agents/{agent_id}/tasks/{task_code}/prepare-transfer"
+        )
+        execute_route = next(
+            route for route in self.app.routes
+            if getattr(route, "path", None) == "/api/v1/ai/transfer/{request_id}/execute"
+        )
+        request = AgentTransferPrepareRequest(
+            document_ids=[document_id], history_id=history["id"]
+        )
+        manifest = prepare_route.endpoint("document-management", "consolidate-files", request)
+        self.assertEqual(self.app.state.openai_adapter.calls, [])
+        self.assertEqual(manifest["providerId"], "openai")
+        self.assertIn(source_text, manifest["payloadPreview"])
+        self.assertNotIn("sk-synthetic-api-key", manifest["payloadPreview"])
+
+        cancelled = execute_route.endpoint(
+            manifest["requestId"], AgentTransferConfirmRequest(confirmed=False)
+        )
+        self.assertTrue(cancelled["cancelled"])
+        self.assertEqual(self.app.state.openai_adapter.calls, [])
+
+        manifest = prepare_route.endpoint("document-management", "consolidate-files", request)
+        result = execute_route.endpoint(
+            manifest["requestId"], AgentTransferConfirmRequest(confirmed=True)
+        )
+        self.assertEqual(len(self.app.state.openai_adapter.calls), 1)
+        self.assertEqual(result["resultText"], "Synthetic AI draft")
+        self.assertEqual(
+            self.app.state.database.get_agent_task_result(history["id"])["resultText"],
+            "Synthetic AI draft",
+        )
+        with closing(sqlite3.connect(self.data_directory / "officeai.sqlite3")) as connection, connection:
+            saved_request = connection.execute(
+                "SELECT result_text FROM agent_task_results"
+            ).fetchone()[0]
+        self.assertEqual(saved_request, "Synthetic AI draft")
+        self.assertNotIn(source_text, saved_request)
+
     def test_xlsx_preview_includes_saved_values_but_skips_formulas_and_cached_results(self) -> None:
         original = self.office_fixture(
             "xlsx",
@@ -615,7 +695,12 @@ class LocalApiSecurityTests(unittest.TestCase):
         original = b"%PDF-1.7\nsynthetic backup fixture\n%%EOF"
         status, body, _ = self.upload("Архив Құжат.pdf", original)
         self.assertEqual(status, 201)
-        self.app.state.database.record_agent_preview("document-management", "check-completeness", 1)
+        history = self.app.state.database.record_agent_preview(
+            "document-management", "check-completeness", 1
+        )
+        self.app.state.database.save_agent_task_result(
+            history["id"], "openai", "gpt-4.1-mini", "Synthetic saved result"
+        )
         service: BackupService = self.app.state.backup_service
         backup = service.create_backup()
         archive_path = self.data_directory / "backups" / f"{backup['id']}.zip"
@@ -635,6 +720,10 @@ class LocalApiSecurityTests(unittest.TestCase):
         self.assertEqual(restored.read_bytes(), original)
         self.assertEqual(self.app.state.document_library.query()[1], 1)
         self.assertEqual(len(self.app.state.database.list_agent_task_history()), 1)
+        self.assertEqual(
+            self.app.state.database.get_agent_task_result(history["id"])["resultText"],
+            "Synthetic saved result",
+        )
         with closing(sqlite3.connect(self.data_directory / "officeai.sqlite3")) as connection, connection:
             operation_codes = {row[0] for row in connection.execute("SELECT operation_code FROM operation_log")}
         self.assertIn("backup_restored", operation_codes)
