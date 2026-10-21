@@ -19,6 +19,7 @@ from office_ai.application.agent_catalog import list_agents
 from office_ai.application.backups import BackupService, InvalidBackup, MAX_BACKUP_SIZE_BYTES
 from office_ai.application.document_library import DocumentLibrary
 from office_ai.application.document_preview import DocumentPreview, InvalidDocumentPreview
+from office_ai.application.result_export import AgentResultExporter, ResultExportError
 from office_ai.application.agent_consent import ConsentRequired
 from office_ai.application.agent_request import AgentRequestError, AgentRequestService, MODEL_ID
 from office_ai.application.operation_journal import read_recent_operations
@@ -299,6 +300,22 @@ def create_app(
         if result is None:
             raise HTTPException(status_code=404, detail="Для этой задачи нет сохранённого результата.")
         return result
+
+    @app.get(f"{API_PREFIX}/agents/history/{{history_id}}/export")
+    async def export_agent_task_result(history_id: str) -> Response:
+        try:
+            rendered = AgentResultExporter(app.state.database).render(history_id)
+        except ResultExportError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return Response(
+            content=rendered.content,
+            media_type=rendered.media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{rendered.filename}"',
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     @app.get(f"{API_PREFIX}/agents/history")
     async def agent_history(limit: int = Query(default=20, ge=1, le=100)) -> dict[str, list[dict[str, Any]]]:
