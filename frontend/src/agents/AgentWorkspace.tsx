@@ -2,13 +2,21 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 
 import { definitions } from "./registry";
 import {
+  cancelAgentTransfer,
   createAgentTaskPreview,
+  executeAgentTransfer,
   getAgentTasks,
   getAgentTaskHistory,
+  getAgentTaskResult,
+  getAIProviderStatus,
   getDocuments,
+  prepareAgentTransfer,
   type AgentTask,
   type AgentTaskPreview,
   type AgentTaskHistoryEntry,
+  type AgentTransferDisclosure,
+  type AgentTaskResult,
+  type AIProviderStatus,
   type LibraryDocument,
 } from "../platform/localApi";
 import type { RuntimeConfig } from "../platform/desktopBridge";
@@ -39,6 +47,10 @@ export default function AgentWorkspace({
   const [instruction, setInstruction] = useState("");
   const [preview, setPreview] = useState<AgentTaskPreview | null>(null);
   const [history, setHistory] = useState<AgentTaskHistoryEntry[]>([]);
+  const [aiStatus, setAiStatus] = useState<AIProviderStatus | null>(null);
+  const [disclosure, setDisclosure] = useState<AgentTransferDisclosure | null>(null);
+  const [transferConfirmed, setTransferConfirmed] = useState(false);
+  const [taskResult, setTaskResult] = useState<AgentTaskResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingDocuments, setLoadingDocuments] = useState(false);
   const [working, setWorking] = useState(false);
@@ -53,16 +65,20 @@ export default function AgentWorkspace({
     setSelectedIds([]);
     setInstruction("");
     setPreview(null);
+    setDisclosure(null);
+    setTransferConfirmed(false);
+    setTaskResult(null);
     if (!runtimeConfig) {
       setLoading(false);
       return;
     }
-    Promise.all([getAgentTasks(runtimeConfig, agent.id), getAgentTaskHistory(runtimeConfig)])
-      .then(([nextTasks, taskHistory]) => {
+    Promise.all([getAgentTasks(runtimeConfig, agent.id), getAgentTaskHistory(runtimeConfig), getAIProviderStatus(runtimeConfig)])
+      .then(([nextTasks, taskHistory, nextAiStatus]) => {
         if (!active) return;
         setTasks(nextTasks);
         setTaskCode(nextTasks[0]?.code || "");
         setHistory(taskHistory);
+        setAiStatus(nextAiStatus);
       })
       .catch((reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : "Не удалось загрузить данные агента.");
@@ -112,6 +128,9 @@ export default function AgentWorkspace({
   function toggleDocument(id: string) {
     setSelectedIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
     setPreview(null);
+    setDisclosure(null);
+    setTransferConfirmed(false);
+    setTaskResult(null);
   }
 
   function submitDocumentSearch(event: FormEvent<HTMLFormElement>) {
@@ -128,6 +147,9 @@ export default function AgentWorkspace({
     setWorking(true);
     setError(null);
     setPreview(null);
+    setDisclosure(null);
+    setTransferConfirmed(false);
+    setTaskResult(null);
     try {
       const result = await createAgentTaskPreview(runtimeConfig, agent.id, task.code, selectedIds, instruction);
       setPreview(result);
@@ -139,6 +161,56 @@ export default function AgentWorkspace({
     }
   }
 
+  async function handlePrepareTransfer() {
+    if (!runtimeConfig || !task || !preview?.historyEntry || !aiStatus?.configured) return;
+    setWorking(true);
+    setError(null);
+    try {
+      const proposal = await prepareAgentTransfer(runtimeConfig, agent.id, task.code, selectedIds, instruction, preview.historyEntry.id);
+      setDisclosure(proposal);
+      setTransferConfirmed(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось подготовить запрос для проверки.");
+    } finally { setWorking(false); }
+  }
+
+  async function handleTransfer() {
+    if (!runtimeConfig || !disclosure || !transferConfirmed) return;
+    setWorking(true);
+    setError(null);
+    try {
+      const response = await executeAgentTransfer(runtimeConfig, disclosure.requestId, true);
+      if (response.cancelled || !response.historyId) throw new Error("Запрос был отменён или не вернул результат.");
+      setTaskResult(await getAgentTaskResult(runtimeConfig, response.historyId));
+      setHistory((current) => current.map((entry) => entry.id === response.historyId ? { ...entry, hasResult: true } : entry));
+      setDisclosure(null);
+      setTransferConfirmed(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось выполнить запрос. Автоматического повтора не будет.");
+    } finally { setWorking(false); }
+  }
+
+  async function handleCancelTransfer() {
+    if (!runtimeConfig || !disclosure) return;
+    setWorking(true);
+    try {
+      await cancelAgentTransfer(runtimeConfig, disclosure.requestId);
+      setDisclosure(null);
+      setTransferConfirmed(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось отменить подготовленный запрос.");
+    } finally { setWorking(false); }
+  }
+
+  async function openSavedResult(historyId: string) {
+    if (!runtimeConfig) return;
+    setWorking(true);
+    setError(null);
+    try { setTaskResult(await getAgentTaskResult(runtimeConfig, historyId)); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Не удалось открыть сохранённый результат."); }
+    finally { setWorking(false); }
+  }
+
   return (
     <section className="agent-workspace">
       <header className="agent-page-heading">
@@ -148,7 +220,7 @@ export default function AgentWorkspace({
           <h1>{agent.title}</h1>
           <p>{screen.intro}</p>
         </div>
-        <span className="agent-status-pill"><i /> ИИ отключён</span>
+        <span className={`agent-status-pill ${aiStatus?.configured ? "ready" : ""}`}><i /> {aiStatus?.configured ? "ИИ доступен по запросу" : "ИИ не настроен"}</span>
       </header>
 
       <div className="agent-workspace-grid">
@@ -157,7 +229,7 @@ export default function AgentWorkspace({
           {loading ? <p className="agent-inline-message">Загружаю список задач и документов…</p> : (
             <div className="agent-input-form">
               <label className="agent-field-label" htmlFor="agent-task">Задача агента</label>
-              <select id="agent-task" value={taskCode} onChange={(event) => { setTaskCode(event.target.value); setSelectedIds([]); setPreview(null); }}>
+              <select id="agent-task" value={taskCode} onChange={(event) => { setTaskCode(event.target.value); setSelectedIds([]); setPreview(null); setDisclosure(null); setTransferConfirmed(false); setTaskResult(null); }}>
                 {tasks.map((item) => <option key={item.code} value={item.code}>{item.title}</option>)}
               </select>
               {task && <p className="agent-task-purpose">{task.purpose}</p>}
@@ -190,7 +262,7 @@ export default function AgentWorkspace({
               </div>
 
               <label className="agent-field-label" htmlFor="agent-instruction">Дополнительная инструкция</label>
-              <textarea id="agent-instruction" maxLength={10_000} rows={4} value={instruction} onChange={(event) => { setInstruction(event.target.value); setPreview(null); }} placeholder="Укажите, на что обратить внимание…" />
+              <textarea id="agent-instruction" maxLength={10_000} rows={4} value={instruction} onChange={(event) => { setInstruction(event.target.value); setPreview(null); setDisclosure(null); setTransferConfirmed(false); setTaskResult(null); }} placeholder="Укажите, на что обратить внимание…" />
               <button className="primary-button" type="button" disabled={working || loading || !task || selectedIds.length === 0} onClick={handlePreview}>
                 {working ? "Подготавливаю…" : "Сформировать локальный предпросмотр"}
               </button>
@@ -220,8 +292,30 @@ export default function AgentWorkspace({
           </ul>
           <pre className="agent-preview-text">{preview.payloadPreview}</pre>
           <p className="agent-preview-footnote">Это локальный предпросмотр. Он не отправлялся в ИИ и не сохранялся в базе данных.</p>
+          <button className="primary-button" type="button" disabled={working || !aiStatus?.configured || !preview.historyEntry} onClick={() => void handlePrepareTransfer()}>
+            {working ? "Готовлю карточку передачи…" : "Просмотреть запрос к OpenAI"}
+          </button>
+          {!aiStatus?.configured && <p className="agent-preview-footnote">Чтобы подготовить запрос, сначала добавьте ключ OpenAI в разделе «Настройки».</p>}
         </section>
       )}
+
+      {disclosure && (
+        <section className="agent-workspace-card transfer-card" aria-labelledby="agent-transfer-title">
+          <div className="workspace-card-heading"><span>!</span><div><h2 id="agent-transfer-title">Проверьте передачу данных</h2><p>Ниже показан точный текст запроса, который будет отправлен.</p></div></div>
+          <div className="transfer-warning" role="note">При подтверждении выбранные данные и инструкция отправятся OpenAI ({disclosure.modelId}) через интернет. Это может повлечь расходы по вашему аккаунту. Параметр запроса просит не сохранять данные, но не отменяет политики обработки и хранения OpenAI.</div>
+          <dl className="transfer-meta">
+            <div><dt>Назначение</dt><dd>{disclosure.purpose}</dd></div>
+            <div><dt>Размер</dt><dd>{formatBytes(disclosure.payloadSizeBytes)} · SHA-256 {disclosure.payloadSha256}</dd></div>
+            <div><dt>Истекает</dt><dd>{formatDate(disclosure.expiresAt)}</dd></div>
+          </dl>
+          <ul className="agent-preview-sources">{disclosure.items.map((item) => <li key={item.id}><strong>{item.name}</strong><span>Категории: {item.categories.join(", ")}</span></li>)}</ul>
+          <pre className="agent-preview-text">{disclosure.payloadPreview}</pre>
+          <label className="transfer-consent"><input type="checkbox" checked={transferConfirmed} disabled={working} onChange={(event) => setTransferConfirmed(event.target.checked)} /><span>Я проверил(а) точный запрос выше, разрешаю отправить перечисленные данные OpenAI и понимаю, что запрос может быть платным.</span></label>
+          <div className="backup-actions"><button className="primary-button" type="button" disabled={working || !transferConfirmed} onClick={() => void handleTransfer()}>{working ? "Ожидайте ответа…" : "Отправить в OpenAI"}</button><button className="secondary-button" type="button" disabled={working} onClick={() => void handleCancelTransfer()}>Отмена</button></div>
+        </section>
+      )}
+
+      {taskResult && <section className="agent-workspace-card agent-result-card"><div className="workspace-card-heading"><span>✓</span><div><h2>Результат агента</h2><p>{taskResult.modelId} · сохранён локально {formatDate(taskResult.createdAt)}</p></div></div><pre className="agent-preview-text">{taskResult.resultText}</pre></section>}
 
       <section className="agent-history-card" aria-labelledby="agent-history-title">
         <div className="workspace-card-heading"><span>04</span><div><h2 id="agent-history-title">Недавняя история</h2><p>Сохраняются только агент, задача, время и число источников.</p></div></div>
@@ -230,6 +324,7 @@ export default function AgentWorkspace({
             {history.map((entry) => <li key={entry.id}>
               <span><strong>{agentNames[entry.agentId] ?? entry.agentId}</strong><small>{taskNames[entry.taskCode] ?? entry.taskCode} · {entry.sourceCount} {pluralDocuments(entry.sourceCount)}</small></span>
               <time dateTime={entry.createdAt}>{formatDate(entry.createdAt)}</time>
+              {entry.hasResult && <button className="text-button" type="button" disabled={working} onClick={() => void openSavedResult(entry.id)}>Открыть результат</button>}
             </li>)}
           </ul>
         )}
@@ -237,7 +332,7 @@ export default function AgentWorkspace({
 
       <div className="agent-privacy-note" role="note">
         <span aria-hidden="true">⌑</span>
-        <div><strong>Предпросмотр выполняется локально</strong><p>Извлекается текст DOCX и текстовых PDF, сохранённые значения XLSX и текст слайдов PPTX. Формулы не вычисляются. Сканированные PDF и изображения пока не распознаются. ИИ-вызовов и передачи данных нет.</p></div>
+        <div><strong>Данные остаются локально до отдельного подтверждения</strong><p>Извлекается текст DOCX и текстовых PDF, сохранённые значения XLSX и текст слайдов PPTX. Формулы не вычисляются. Сканированные PDF и изображения пока не распознаются. Сетевой запрос невозможен, пока вы не просмотрели точный текст и не подтвердили конкретную передачу.</p></div>
       </div>
     </section>
   );
