@@ -15,7 +15,7 @@ import type { RuntimeConfig } from "../platform/desktopBridge";
 import type { AgentDescriptor } from "../platform/localApi";
 
 const categoryDocumentTypes: Record<string, LibraryDocument["type"][]> = {
-  document_text: ["DOCX"],
+  document_text: ["DOCX", "PDF"],
   spreadsheet_values: ["XLSX"],
   presentation_content: ["PPTX"],
 };
@@ -198,7 +198,7 @@ export default function AgentWorkspace({
 
       <div className="agent-privacy-note" role="note">
         <span aria-hidden="true">⌑</span>
-        <div><strong>Предпросмотр выполняется локально</strong><p>Извлекается текст DOCX, сохранённые значения XLSX и текст слайдов PPTX. Формулы не вычисляются. PDF и изображения пока не обрабатываются. ИИ-вызовов и передачи данных нет.</p></div>
+        <div><strong>Предпросмотр выполняется локально</strong><p>Извлекается текст DOCX и текстовых PDF, сохранённые значения XLSX и текст слайдов PPTX. Формулы не вычисляются. Сканированные PDF и изображения пока не распознаются. ИИ-вызовов и передачи данных нет.</p></div>
       </div>
     </section>
   );
