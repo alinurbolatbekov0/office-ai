@@ -11,7 +11,6 @@ import threading
 import time
 import urllib.error
 import urllib.request
-import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
