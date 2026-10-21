@@ -8,6 +8,9 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError
+
 from office_ai.application.document_library import DocumentLibrary
 from office_ai.domain.agents.task_catalog import get_agent_task
 
@@ -17,15 +20,9 @@ MAX_XML_MEMBER_BYTES = 8 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 10_000
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 500 * 1024 * 1024
 MAX_SPREADSHEET_CELLS = 20_000
+MAX_PDF_PAGES = 500
 MAX_SLIDES = 100
 _FORBIDDEN_XML_DECLARATIONS = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
-_CATEGORY_BY_TYPE = {
-    "DOCX": "document_text",
-    "XLSX": "spreadsheet_values",
-    "PPTX": "presentation_content",
-}
-
-
 class InvalidDocumentPreview(ValueError):
     """Raised when a selected file cannot safely contribute to a preview."""
 
@@ -68,14 +65,15 @@ class DocumentPreview:
             document_type = filename.rsplit(".", 1)[-1].lower()
             category = {
                 "docx": "document_text",
+                "pdf": "document_text",
                 "xlsx": "spreadsheet_values",
                 "pptx": "presentation_content",
             }.get(document_type)
             if category is None:
-                if document_type in {"pdf", "jpg", "jpeg", "png"}:
+                if document_type in {"jpg", "jpeg", "png"}:
                     raise InvalidDocumentPreview(
-                        "Извлечение текста из PDF и изображений пока не подключено. "
-                        "Для изображений потребуется OCR с отдельным подтверждением."
+                        "Извлечение текста из изображений пока не подключено. "
+                        "Для изображений потребуется локальный OCR."
                     )
                 raise InvalidDocumentPreview("Формат документа не поддерживается этим предпросмотром.")
             if category not in task.allowed_categories:
@@ -101,11 +99,42 @@ class DocumentPreview:
 def _extract(path: Path, extension: str) -> str:
     if extension == "docx":
         return _extract_docx(path)
+    if extension == "pdf":
+        return _extract_pdf(path)
     if extension == "xlsx":
         return _extract_xlsx(path)
     if extension == "pptx":
         return _extract_pptx(path)
     raise InvalidDocumentPreview("Формат документа не поддерживается этим предпросмотром.")
+
+
+def _extract_pdf(path: Path) -> str:
+    """Extract bounded text locally; PDF actions, attachments and scripts are not executed."""
+    try:
+        reader = PdfReader(path, strict=True, root_object_recovery_limit=5_000)
+        if reader.is_encrypted:
+            raise InvalidDocumentPreview("Зашифрованные PDF пока не поддерживаются.")
+        if len(reader.pages) > MAX_PDF_PAGES:
+            raise InvalidDocumentPreview("В PDF больше 500 страниц.")
+        pages: list[str] = []
+        characters_seen = 0
+        for index, page in enumerate(reader.pages, start=1):
+            text = page.extract_text(extraction_mode="plain") or ""
+            if text.strip():
+                page_text = f"Страница {index}:\n{text.strip()}"
+                characters_seen += len(page_text)
+                if characters_seen > MAX_PREVIEW_CHARS:
+                    raise InvalidDocumentPreview("Текст документа превышает ограничение предпросмотра 300 000 символов.")
+                pages.append(page_text)
+        if not pages:
+            raise InvalidDocumentPreview(
+                "В PDF не найден текст. Сканированные страницы пока не распознаются (OCR отключён)."
+            )
+        return "\n\n".join(pages)
+    except InvalidDocumentPreview:
+        raise
+    except (PdfReadError, ValueError, OSError, RecursionError, RuntimeError, KeyError) as error:
+        raise InvalidDocumentPreview("Не удалось безопасно извлечь текст из PDF.") from error
 
 
 def _read_xml(archive: ZipFile, member: str) -> ET.Element:
