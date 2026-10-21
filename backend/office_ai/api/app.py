@@ -10,7 +10,7 @@ from typing import Any, Final, Literal
 from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -18,6 +18,7 @@ from office_ai import __version__
 from office_ai.application.agent_catalog import list_agents
 from office_ai.application.backups import BackupService, InvalidBackup, MAX_BACKUP_SIZE_BYTES
 from office_ai.application.document_library import DocumentLibrary
+from office_ai.application.document_preview import DocumentPreview, InvalidDocumentPreview
 from office_ai.application.operation_journal import read_recent_operations
 from office_ai.application.settings import read_settings, update_setting
 from office_ai.domain.agents.task_catalog import serialize_agent_tasks
@@ -42,6 +43,13 @@ class SettingUpdateRequest(BaseModel):
     value: Any
 
 
+class AgentPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    document_ids: list[str] = Field(min_length=1, max_length=5)
+    instruction: str = Field(default="", max_length=10_000)
+
+
 def create_app(
     *,
     expected_host: str,
@@ -63,6 +71,7 @@ def create_app(
     database.record_operation("app_started", message_code="app_started")
     app.state.database = database
     app.state.document_library = DocumentLibrary(database)
+    app.state.document_preview = DocumentPreview(app.state.document_library)
     app.state.backup_service = BackupService(database)
     # Keep file/database operations serial for this single-user local app. This
     # also ensures no upload or settings write overlaps a restore swap.
@@ -77,6 +86,15 @@ def create_app(
 
         if not request.url.path.startswith(API_PREFIX):
             return await call_next(request)
+
+        if request.url.path.endswith("/preview"):
+            content_length = request.headers.get("content-length")
+            if content_length:
+                try:
+                    if int(content_length) > 32 * 1024:
+                        return JSONResponse({"detail": "Запрос предпросмотра превышает ограничение."}, status_code=413)
+                except ValueError:
+                    return JSONResponse({"detail": "Некорректный размер запроса."}, status_code=400)
 
         origin = request.headers.get("origin")
         if origin != expected_origin:
@@ -130,6 +148,18 @@ def create_app(
         if not tasks:
             raise HTTPException(status_code=404, detail="Агент не найден.")
         return {"tasks": tasks}
+
+    @app.post(f"{API_PREFIX}/agents/{{agent_id}}/tasks/{{task_code}}/preview")
+    def agent_task_preview(agent_id: str, task_code: str, payload: AgentPreviewRequest) -> dict[str, object]:
+        try:
+            return app.state.document_preview.create(
+                agent_id=agent_id,
+                task_code=task_code,
+                document_ids=payload.document_ids,
+                instruction=payload.instruction,
+            )
+        except InvalidDocumentPreview as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @app.get(f"{API_PREFIX}/settings")
     async def settings() -> dict[str, dict[str, Any]]:
