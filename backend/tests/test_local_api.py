@@ -615,6 +615,7 @@ class LocalApiSecurityTests(unittest.TestCase):
         original = b"%PDF-1.7\nsynthetic backup fixture\n%%EOF"
         status, body, _ = self.upload("Архив Құжат.pdf", original)
         self.assertEqual(status, 201)
+        self.app.state.database.record_agent_preview("document-management", "check-completeness", 1)
         service: BackupService = self.app.state.backup_service
         backup = service.create_backup()
         archive_path = self.data_directory / "backups" / f"{backup['id']}.zip"
@@ -633,6 +634,7 @@ class LocalApiSecurityTests(unittest.TestCase):
         restored = next((self.data_directory / "documents").glob("*.bin"))
         self.assertEqual(restored.read_bytes(), original)
         self.assertEqual(self.app.state.document_library.query()[1], 1)
+        self.assertEqual(len(self.app.state.database.list_agent_task_history()), 1)
         with closing(sqlite3.connect(self.data_directory / "officeai.sqlite3")) as connection, connection:
             operation_codes = {row[0] for row in connection.execute("SELECT operation_code FROM operation_log")}
         self.assertIn("backup_restored", operation_codes)
