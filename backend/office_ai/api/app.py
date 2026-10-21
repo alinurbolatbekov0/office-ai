@@ -128,7 +128,13 @@ def create_app(
                     return JSONResponse({"detail": "Некорректный размер запроса."}, status_code=400)
 
         origin = request.headers.get("origin")
-        if origin != expected_origin:
+        # WebView2 may omit Origin for same-origin GET/PUT requests. The random
+        # per-window session token and exact Host check still authenticate those
+        # calls. Browsers include Origin on cross-origin fetches and preflights,
+        # so keep rejecting every supplied origin except the app's own UI.
+        if (origin is not None and origin != expected_origin) or (
+            origin is None and request.method == "OPTIONS"
+        ):
             return JSONResponse({"detail": "Источник запроса не разрешён."}, status_code=403)
 
         if request.method == "OPTIONS":
@@ -160,8 +166,9 @@ def create_app(
 
         async with app.state.data_operation_lock:
             response = await call_next(request)
-        response.headers["Access-Control-Allow-Origin"] = expected_origin
-        response.headers["Vary"] = "Origin"
+        if origin is not None:
+            response.headers["Access-Control-Allow-Origin"] = expected_origin
+            response.headers["Vary"] = "Origin"
         response.headers["Cache-Control"] = "no-store"
         return response
 

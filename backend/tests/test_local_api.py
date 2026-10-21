@@ -140,6 +140,16 @@ class LocalApiSecurityTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["status"], "ok")
 
+        same_origin_without_origin_header = {
+            key: value for key, value in self.headers.items() if key != "origin"
+        }
+        status, body, response_headers = self.request(
+            "/api/v1/health", same_origin_without_origin_header
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["status"], "ok")
+        self.assertNotIn("access-control-allow-origin", response_headers)
+
         missing_token = {key: value for key, value in self.headers.items() if key != "x-officeai-token"}
         self.assertEqual(self.request("/api/v1/health", missing_token)[0], 403)
 
@@ -173,6 +183,9 @@ class LocalApiSecurityTests(unittest.TestCase):
 
         unsafe_headers = {**headers, "access-control-request-headers": "authorization"}
         self.assertEqual(self.request("/api/v1/health", unsafe_headers, method="OPTIONS")[0], 403)
+
+        missing_origin = {key: value for key, value in headers.items() if key != "origin"}
+        self.assertEqual(self.request("/api/v1/health", missing_origin, method="OPTIONS")[0], 403)
 
     def test_schema_is_versioned_and_database_stays_under_injected_user_data_root(self) -> None:
         database_path = self.data_directory / "officeai.sqlite3"
