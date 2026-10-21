@@ -150,14 +150,15 @@ def create_app(
         return {"tasks": tasks}
 
     @app.post(f"{API_PREFIX}/agents/{{agent_id}}/tasks/{{task_code}}/preview")
-    def agent_task_preview(agent_id: str, task_code: str, payload: AgentPreviewRequest) -> dict[str, object]:
+    def agent_task_preview(agent_id: str, task_code: str, payload: AgentPreviewRequest) -> JSONResponse:
         try:
-            return app.state.document_preview.create(
+            result = app.state.document_preview.create(
                 agent_id=agent_id,
                 task_code=task_code,
                 document_ids=payload.document_ids,
                 instruction=payload.instruction,
             )
+            return JSONResponse(result)
         except InvalidDocumentPreview as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
