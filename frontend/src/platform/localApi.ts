@@ -30,6 +30,16 @@ export interface AgentTaskPreview {
   sources: AgentPreviewSource[];
   payloadPreview: string;
   payloadCharacters: number;
+  historyEntry?: AgentTaskHistoryEntry;
+}
+
+export interface AgentTaskHistoryEntry {
+  id: string;
+  agentId: string;
+  taskCode: string;
+  outcome: "preview_ready";
+  sourceCount: number;
+  createdAt: string;
 }
 
 export interface HealthStatus {
@@ -233,6 +243,11 @@ export async function getAgents(config: RuntimeConfig): Promise<AgentDescriptor[
 export async function getAgentTasks(config: RuntimeConfig, agentId: string): Promise<AgentTask[]> {
   const response = await request<{ tasks: AgentTask[] }>(config, `agents/${encodeURIComponent(agentId)}/tasks`);
   return response.tasks;
+}
+
+export async function getAgentTaskHistory(config: RuntimeConfig): Promise<AgentTaskHistoryEntry[]> {
+  const response = await request<{ history: AgentTaskHistoryEntry[] }>(config, "agents/history?limit=20");
+  return response.history;
 }
 
 export async function createAgentTaskPreview(
