@@ -11,12 +11,16 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 import uvicorn
 
 from office_ai.api.app import create_app
+from office_ai.application.backups import BackupService
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = ROOT_DIR / "frontend"
@@ -34,14 +38,46 @@ class RuntimeConfig:
 class DesktopBridge:
     """Narrow pywebview bridge: only the active app window gets the token."""
 
-    def __init__(self, config: RuntimeConfig) -> None:
+    def __init__(self, config: RuntimeConfig, backup_service: BackupService) -> None:
         self._config = config
+        self._backup_service = backup_service
 
     def get_runtime_config(self) -> dict[str, str]:
         return {
             "apiBaseUrl": self._config.api_base_url,
             "sessionToken": self._config.session_token,
         }
+
+    def save_backup(self, backup_id: str) -> bool:
+        """Show a native Save dialog and stream one generated local archive to it."""
+        backup = self._backup_service.get_backup_download(backup_id)
+        if backup is None:
+            raise ValueError("Резервная копия не найдена.")
+        source, filename = backup
+        try:
+            import webview
+        except ImportError as error:
+            raise RuntimeError("Нативный диалог доступен только в desktop-оболочке.") from error
+        selected = webview.windows[0].create_file_dialog(
+            webview.SAVE_DIALOG,
+            save_filename=filename,
+            file_types=("ZIP архив (*.zip)",),
+        )
+        if not selected:
+            return False
+        destination = Path(selected[0] if isinstance(selected, (tuple, list)) else selected)
+        if destination.suffix.lower() != ".zip":
+            destination = destination.with_suffix(".zip")
+        temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+        try:
+            with source.open("rb") as input_file, temporary.open("xb") as output_file:
+                shutil.copyfileobj(input_file, output_file, length=1024 * 1024)
+                output_file.flush()
+                os.fsync(output_file.fileno())
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return True
 
 
 def _wait_for_vite(process: subprocess.Popen[bytes], timeout: float = 45.0) -> None:
@@ -62,7 +98,7 @@ def _wait_for_vite(process: subprocess.Popen[bytes], timeout: float = 45.0) -> N
 def _start_backend(
     session_token: str,
     frontend_origin: str | None,
-) -> tuple[uvicorn.Server, threading.Thread, socket.socket, int, str]:
+) -> tuple[uvicorn.Server, threading.Thread, socket.socket, int, str, BackupService]:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind((DEV_HOST, 0))
     listener.listen(128)
@@ -88,7 +124,7 @@ def _start_backend(
         server.should_exit = True
         listener.close()
         raise TimeoutError("Локальный API не подтвердил запуск.")
-    return server, thread, listener, port, frontend_origin
+    return server, thread, listener, port, frontend_origin, app.state.backup_service
 
 
 def _open_window(url: str, bridge: DesktopBridge, *, debug: bool) -> None:
@@ -118,6 +154,7 @@ def run(*, dev: bool) -> None:
     server: uvicorn.Server | None = None
     thread: threading.Thread | None = None
     listener: socket.socket | None = None
+    backup_service: BackupService | None = None
 
     try:
         if dev:
@@ -132,13 +169,17 @@ def run(*, dev: bool) -> None:
 
         # Production serves the SPA and API from one origin; development uses Vite.
         token = secrets.token_urlsafe(32)
-        server, thread, listener, port, frontend_origin = _start_backend(
+        server, thread, listener, port, frontend_origin, backup_service = _start_backend(
             token,
             frontend_origin if dev else None,
         )
         bridge_token = token
 
-        bridge = DesktopBridge(RuntimeConfig(api_base_url=f"http://{DEV_HOST}:{port}/api/v1", session_token=bridge_token))
+        assert backup_service is not None
+        bridge = DesktopBridge(
+            RuntimeConfig(api_base_url=f"http://{DEV_HOST}:{port}/api/v1", session_token=bridge_token),
+            backup_service,
+        )
         ui_url = frontend_origin if dev else f"http://{DEV_HOST}:{port}/"
         _open_window(ui_url, bridge, debug=dev)
     finally:
